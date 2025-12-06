@@ -35,8 +35,8 @@ impl BM25Index {
         fs::create_dir_all(path)?;
 
         let schema = build_schema();
-        let index = Index::create_in_dir(path, schema.clone())
-            .context("Failed to create tantivy index")?;
+        let index =
+            Index::create_in_dir(path, schema.clone()).context("Failed to create tantivy index")?;
 
         let reader = index
             .reader_builder()

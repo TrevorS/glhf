@@ -5,7 +5,7 @@ pub use conversation::parse_jsonl_file;
 use crate::config;
 use crate::Document;
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 /// Discovers all conversation JSONL files in ~/.claude/projects
@@ -24,7 +24,7 @@ pub fn discover_conversation_files() -> Result<Vec<PathBuf>> {
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
-        if path.is_file() && path.extension().map_or(false, |ext| ext == "jsonl") {
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
             files.push(path.to_path_buf());
         }
     }
@@ -52,7 +52,7 @@ pub fn ingest_all() -> Result<Vec<Document>> {
 }
 
 /// Extracts the project name from a JSONL file path
-pub fn extract_project_from_path(path: &PathBuf) -> Option<String> {
+pub fn extract_project_from_path(path: &Path) -> Option<String> {
     // Path format: ~/.claude/projects/-Users-trevor-Projects-foo/session.jsonl
     let projects_dir = config::projects_dir();
 

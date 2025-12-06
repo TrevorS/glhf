@@ -1,5 +1,5 @@
-use crate::models::document::{DocType, Document};
 use crate::ingest::extract_project_from_path;
+use crate::models::document::{DocType, Document};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -13,7 +13,7 @@ pub fn parse_jsonl_file(path: &Path) -> Result<Vec<Document>> {
     let reader = BufReader::new(file);
     let mut documents = Vec::new();
 
-    let project = extract_project_from_path(&path.to_path_buf());
+    let project = extract_project_from_path(path);
 
     for line in reader.lines() {
         let line = match line {
@@ -90,10 +90,7 @@ fn extract_message_content(value: &Value) -> String {
 
         // Array of content blocks (tool results, etc.)
         Value::Array(blocks) => {
-            let texts: Vec<String> = blocks
-                .iter()
-                .filter_map(|block| extract_text_from_block(block))
-                .collect();
+            let texts: Vec<String> = blocks.iter().filter_map(extract_text_from_block).collect();
             texts.join("\n")
         }
 
@@ -115,11 +112,7 @@ fn extract_text_from_block(block: &Value) -> Option<String> {
             Value::Array(arr) => {
                 let texts: Vec<String> = arr
                     .iter()
-                    .filter_map(|item| {
-                        item.get("text")
-                            .and_then(|v| v.as_str())
-                            .map(String::from)
-                    })
+                    .filter_map(|item| item.get("text").and_then(|v| v.as_str()).map(String::from))
                     .collect();
                 if !texts.is_empty() {
                     return Some(texts.join("\n"));

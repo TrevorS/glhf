@@ -130,7 +130,10 @@ pub fn status() -> Result<()> {
 /// Calculate directory size in bytes
 fn dir_size(path: &std::path::Path) -> Result<u64> {
     let mut size = 0;
-    for entry in walkdir::WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if entry.file_type().is_file() {
             size += entry.metadata()?.len();
         }
@@ -187,7 +190,10 @@ fn truncate_content(content: &str, max_len: usize) -> String {
 
     if result.is_empty() {
         // Single word too long - just take first max_len chars
-        format!("{}...", normalized.chars().take(max_len).collect::<String>())
+        format!(
+            "{}...",
+            normalized.chars().take(max_len).collect::<String>()
+        )
     } else {
         format!("{}...", result)
     }

@@ -26,12 +26,27 @@ pub fn projects_dir() -> PathBuf {
 
 /// Decodes an encoded project path from Claude's directory structure
 /// e.g., "-Users-trevor-Projects-foo" -> "/Users/trevor/Projects/foo"
+/// Double dashes represent /. : "-Users-trevor--claude" -> "/Users/trevor/.claude"
 pub fn decode_project_path(encoded: &str) -> String {
-    if encoded.starts_with('-') {
-        encoded.replacen('-', "/", 1).replace('-', "/")
-    } else {
-        encoded.replace('-', "/")
+    let mut result = String::new();
+    let mut chars = encoded.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '-' {
+            if chars.peek() == Some(&'-') {
+                // Double dash -> /. (hidden dir)
+                chars.next();
+                result.push_str("/.");
+            } else {
+                // Single dash -> slash
+                result.push('/');
+            }
+        } else {
+            result.push(c);
+        }
     }
+
+    result
 }
 
 #[cfg(test)]

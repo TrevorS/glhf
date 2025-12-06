@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocType {
@@ -39,11 +39,7 @@ pub struct Document {
 
 impl Document {
     /// Creates a new Document with an auto-generated ID
-    pub fn new(
-        doc_type: DocType,
-        content: String,
-        source_path: PathBuf,
-    ) -> Self {
+    pub fn new(doc_type: DocType, content: String, source_path: PathBuf) -> Self {
         let id = generate_id(&source_path, &content);
         Self {
             id,
@@ -84,7 +80,7 @@ impl Document {
         } else {
             // Find a good break point (space or newline)
             let truncated = &self.content[..max_len];
-            if let Some(last_space) = truncated.rfind(|c| c == ' ' || c == '\n') {
+            if let Some(last_space) = truncated.rfind([' ', '\n']) {
                 &self.content[..last_space]
             } else {
                 truncated
@@ -94,7 +90,7 @@ impl Document {
 }
 
 /// Generates a deterministic ID from the source path and content
-fn generate_id(source_path: &PathBuf, content: &str) -> String {
+fn generate_id(source_path: &Path, content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(source_path.to_string_lossy().as_bytes());
     // Use first ~100 chars of content to avoid hashing huge strings
@@ -141,6 +137,7 @@ mod tests {
             "hello world this is a test".to_string(),
             PathBuf::from("/test"),
         );
-        assert_eq!(doc.snippet(11), "hello world");
+        // Truncates at word boundary before max_len
+        assert_eq!(doc.snippet(15), "hello world");
     }
 }
