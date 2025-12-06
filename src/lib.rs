@@ -36,5 +36,4 @@ pub mod ingest;
 pub mod models;
 
 pub use error::{Error, Result};
-#[allow(deprecated)]
-pub use models::document::{ChunkKind, DocType, Document};
+pub use models::document::{ChunkKind, Document};

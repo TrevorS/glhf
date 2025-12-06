@@ -140,13 +140,16 @@ src/
 ### Document Model (Implemented)
 ```rust
 pub struct Document {
-    pub id: String,              // SHA256 hash of path + content prefix
-    pub doc_type: DocType,       // Currently: Conversation only
-    pub project: Option<String>, // Decoded project path
+    pub id: String,               // SHA256 hash of path + content prefix
+    pub chunk_kind: ChunkKind,    // Message, ToolUse, or ToolResult
+    pub project: Option<String>,  // Decoded project path
     pub timestamp: Option<DateTime<Utc>>,
     pub session_id: Option<String>,
-    pub role: Option<String>,    // "user" or "assistant"
-    pub content: String,         // Searchable text
+    pub role: Option<String>,     // "user" or "assistant" (for Message)
+    pub tool_name: Option<String>,// e.g., "Bash", "Read", "Edit" (for tools)
+    pub tool_id: Option<String>,  // Links ToolUse to ToolResult
+    pub is_error: Option<bool>,   // Whether tool result was an error
+    pub content: String,          // Searchable text
     pub source_path: PathBuf,
 }
 ```

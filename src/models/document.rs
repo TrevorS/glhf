@@ -50,9 +50,6 @@ impl ChunkKind {
     }
 }
 
-// Keep DocType as an alias for backwards compatibility
-#[deprecated(since = "0.2.0", note = "Use ChunkKind instead")]
-pub type DocType = ChunkKind;
 
 /// A document/chunk to be indexed and searched.
 ///
@@ -419,12 +416,12 @@ mod tests {
 
     #[test]
     fn test_is_helpers() {
-        let msg = Document::new(ChunkKind::Message, "".to_string(), PathBuf::from("/test"));
+        let msg = Document::new(ChunkKind::Message, String::new(), PathBuf::from("/test"));
         assert!(msg.is_message());
         assert!(!msg.is_tool_use());
         assert!(!msg.is_tool_result());
 
-        let tool = Document::new(ChunkKind::ToolUse, "".to_string(), PathBuf::from("/test"));
+        let tool = Document::new(ChunkKind::ToolUse, String::new(), PathBuf::from("/test"));
         assert!(!tool.is_message());
         assert!(tool.is_tool_use());
         assert!(!tool.is_tool_result());
