@@ -54,6 +54,10 @@ pub enum Error {
         /// The path where the index was expected.
         path: PathBuf,
     },
+
+    /// Invalid regular expression pattern.
+    #[error("invalid regex pattern: {0}")]
+    Regex(#[from] regex::Error),
 }
 
 impl Error {

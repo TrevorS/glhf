@@ -20,12 +20,20 @@ enum Commands {
 
     /// Search indexed content
     Search {
-        /// The search query
+        /// The search query (or regex pattern with -e)
         query: String,
 
         /// Maximum number of results to return
         #[arg(short, long, default_value = "10")]
         limit: usize,
+
+        /// Interpret the query as a regular expression (like grep -e)
+        #[arg(short = 'e', long = "regex")]
+        regex: bool,
+
+        /// Case-insensitive search (like grep -i)
+        #[arg(short = 'i', long = "ignore-case")]
+        ignore_case: bool,
 
         /// Show N messages after each match (like grep -A)
         #[arg(short = 'A', long = "after-context", value_name = "NUM")]
@@ -54,12 +62,16 @@ fn main() -> Result<()> {
         Commands::Search {
             query,
             limit,
+            regex,
+            ignore_case,
             after,
             before,
             context,
         } => {
             let options = SearchOptions {
                 limit,
+                regex,
+                ignore_case,
                 before: context.or(before).unwrap_or(0),
                 after: context.or(after).unwrap_or(0),
             };

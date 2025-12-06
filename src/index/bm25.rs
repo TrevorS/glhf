@@ -190,6 +190,49 @@ impl BM25Index {
         Ok(results)
     }
 
+    /// Searches the index using a regular expression pattern.
+    ///
+    /// This performs a full scan of all documents and filters using the regex.
+    /// For case-insensitive matching, set `ignore_case` to true.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the regex pattern is invalid or the search fails.
+    pub fn search_regex(
+        &self,
+        pattern: &str,
+        limit: usize,
+        ignore_case: bool,
+    ) -> Result<Vec<SearchResult>> {
+        // Build regex with case sensitivity option
+        let regex = regex::RegexBuilder::new(pattern)
+            .case_insensitive(ignore_case)
+            .build()?;
+
+        let searcher = self.reader.searcher();
+
+        // We need to scan all documents and filter by regex
+        let top_docs = searcher
+            .search(&AllQuery, &TopDocs::with_limit(100_000))
+            .map_err(|e| Error::from_tantivy(e, "regex search failed"))?;
+
+        let mut results: Vec<SearchResult> = top_docs
+            .into_iter()
+            .filter_map(|(_, doc_address)| {
+                searcher.doc(doc_address).ok().and_then(|doc| {
+                    let result = self.extract_search_result(&doc);
+                    regex.is_match(&result.content).then_some(result)
+                })
+            })
+            .take(limit)
+            .collect();
+
+        // Sort by timestamp (most recent first for regex matches)
+        results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+        Ok(results)
+    }
+
     /// Retrieves all messages for a given session, sorted by timestamp.
     ///
     /// # Errors

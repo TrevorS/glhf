@@ -637,6 +637,7 @@ dependencies = [
  "criterion",
  "dirs",
  "hex",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

@@ -15,6 +15,10 @@ use std::time::Instant;
 pub struct SearchOptions {
     /// Maximum number of results to return.
     pub limit: usize,
+    /// Whether to interpret query as a regex pattern.
+    pub regex: bool,
+    /// Whether to do case-insensitive matching.
+    pub ignore_case: bool,
     /// Number of messages to show before each match.
     pub before: usize,
     /// Number of messages to show after each match.
@@ -76,7 +80,12 @@ pub fn search(query: &str, options: SearchOptions) -> Result<()> {
     }
 
     let idx = BM25Index::open(&index_path).context("Failed to open index")?;
-    let results = idx.search(query, options.limit)?;
+
+    let results = if options.regex {
+        idx.search_regex(query, options.limit, options.ignore_case)?
+    } else {
+        idx.search(query, options.limit)?
+    };
 
     if results.is_empty() {
         println!("No matches found for: {query}");
