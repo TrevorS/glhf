@@ -135,11 +135,11 @@ fn print_result_header(num: usize, result: &SearchResult) {
         p.rsplit('/').next().unwrap_or(p)
     });
 
-    let role_display = result.role.as_deref().unwrap_or("?");
+    let label = result.display_label();
 
     println!(
         "[{}] {} | {} | {} | Score: {:.2}",
-        num, result.doc_type, project_display, role_display, result.score
+        num, result.chunk_kind, project_display, label, result.score
     );
 }
 
@@ -182,10 +182,10 @@ fn print_result_with_context(
         let absolute_idx = start + idx;
         let is_match = absolute_idx == pos;
         let prefix = if is_match { ">>>" } else { "   " };
-        let role = msg.role.as_deref().unwrap_or("?");
+        let label = msg.display_label();
 
         let snippet = truncate_content(&msg.content, 150);
-        println!("{prefix} [{role}] \"{snippet}\"");
+        println!("{prefix} [{label}] \"{snippet}\"");
     }
     println!();
 }

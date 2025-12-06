@@ -3,7 +3,7 @@ mod common;
 use common::*;
 use glhf::index::BM25Index;
 use glhf::ingest::parse_jsonl_file;
-use glhf::models::document::{DocType, Document};
+use glhf::models::document::{ChunkKind, Document};
 use std::path::PathBuf;
 
 #[test]
@@ -87,19 +87,19 @@ fn test_index_and_search() {
     // Create some documents
     let docs = vec![
         Document::new(
-            DocType::Conversation,
+            ChunkKind::Message,
             "Rust programming language is great for systems".to_string(),
             PathBuf::from("/test/1.jsonl"),
         )
         .with_role(Some("user".to_string())),
         Document::new(
-            DocType::Conversation,
+            ChunkKind::Message,
             "Python is good for machine learning".to_string(),
             PathBuf::from("/test/2.jsonl"),
         )
         .with_role(Some("assistant".to_string())),
         Document::new(
-            DocType::Conversation,
+            ChunkKind::Message,
             "JavaScript runs in browsers".to_string(),
             PathBuf::from("/test/3.jsonl"),
         )
@@ -135,7 +135,7 @@ fn test_search_no_results() {
     let env = TestEnv::new();
 
     let docs = vec![Document::new(
-        DocType::Conversation,
+        ChunkKind::Message,
         "Hello world".to_string(),
         PathBuf::from("/test/1.jsonl"),
     )];
@@ -159,7 +159,7 @@ fn test_index_document_count() {
     let docs: Vec<Document> = (0..5)
         .map(|i| {
             Document::new(
-                DocType::Conversation,
+                ChunkKind::Message,
                 format!("Document number {}", i),
                 PathBuf::from(format!("/test/{}.jsonl", i)),
             )
@@ -184,7 +184,7 @@ fn test_reopen_index() {
     // Create and populate index
     {
         let docs = vec![Document::new(
-            DocType::Conversation,
+            ChunkKind::Message,
             "Persistent data".to_string(),
             PathBuf::from("/test/1.jsonl"),
         )];
@@ -210,7 +210,7 @@ fn test_search_result_metadata() {
     let env = TestEnv::new();
 
     let doc = Document::new(
-        DocType::Conversation,
+        ChunkKind::Message,
         "Test content for metadata".to_string(),
         PathBuf::from("/test/meta.jsonl"),
     )
@@ -233,5 +233,47 @@ fn test_search_result_metadata() {
     assert_eq!(result.project.as_deref(), Some("/Users/test/project"));
     assert_eq!(result.session_id.as_deref(), Some("session-xyz"));
     assert_eq!(result.role.as_deref(), Some("assistant"));
-    assert_eq!(result.doc_type, "conversation");
+    assert_eq!(result.chunk_kind, "message");
+}
+
+#[test]
+fn test_tool_use_indexing() {
+    let env = TestEnv::new();
+
+    let docs = vec![
+        Document::new(
+            ChunkKind::ToolUse,
+            "git status".to_string(),
+            PathBuf::from("/test/1.jsonl"),
+        )
+        .with_tool_name(Some("Bash".to_string()))
+        .with_tool_id(Some("tool-123".to_string()))
+        .with_tool_input(Some(r#"{"command": "git status"}"#.to_string())),
+        Document::new(
+            ChunkKind::ToolResult,
+            "On branch main".to_string(),
+            PathBuf::from("/test/1.jsonl"),
+        )
+        .with_tool_id(Some("tool-123".to_string()))
+        .with_is_error(Some(false)),
+    ];
+
+    let index = BM25Index::create(&env.index_dir).expect("Failed to create index");
+    let mut writer = index.writer().expect("Failed to create writer");
+    index
+        .add_documents(&mut writer, &docs)
+        .expect("Failed to add documents");
+    writer.commit().expect("Failed to commit");
+    index.reload().expect("Failed to reload reader");
+
+    // Search for git
+    let results = index.search("git", 10).expect("Search failed");
+    assert!(!results.is_empty());
+    assert_eq!(results[0].chunk_kind, "tool_use");
+    assert_eq!(results[0].tool_name.as_deref(), Some("Bash"));
+
+    // Search for branch
+    let results = index.search("branch main", 10).expect("Search failed");
+    assert!(!results.is_empty());
+    assert_eq!(results[0].chunk_kind, "tool_result");
 }
