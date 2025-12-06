@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use glhf::commands::SearchOptions;
 
 #[derive(Parser)]
 #[command(name = "glhf", about = "Search your Claude Code history")]
@@ -25,6 +26,18 @@ enum Commands {
         /// Maximum number of results to return
         #[arg(short, long, default_value = "10")]
         limit: usize,
+
+        /// Show N messages after each match (like grep -A)
+        #[arg(short = 'A', long = "after-context", value_name = "NUM")]
+        after: Option<usize>,
+
+        /// Show N messages before each match (like grep -B)
+        #[arg(short = 'B', long = "before-context", value_name = "NUM")]
+        before: Option<usize>,
+
+        /// Show N messages before and after each match (like grep -C)
+        #[arg(short = 'C', long = "context", value_name = "NUM")]
+        context: Option<usize>,
     },
 
     /// Show index status and statistics
@@ -38,8 +51,19 @@ fn main() -> Result<()> {
         Commands::Index { rebuild } => {
             glhf::commands::index(rebuild)?;
         }
-        Commands::Search { query, limit } => {
-            glhf::commands::search(&query, limit)?;
+        Commands::Search {
+            query,
+            limit,
+            after,
+            before,
+            context,
+        } => {
+            let options = SearchOptions {
+                limit,
+                before: context.or(before).unwrap_or(0),
+                after: context.or(after).unwrap_or(0),
+            };
+            glhf::commands::search(&query, options)?;
         }
         Commands::Status => {
             glhf::commands::status()?;

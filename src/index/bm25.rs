@@ -6,8 +6,9 @@ use chrono::{DateTime, Utc};
 use std::fs;
 use std::path::Path;
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
-use tantivy::schema::{Schema, Value, INDEXED, STORED, STRING, TEXT};
+use tantivy::query::{AllQuery, QueryParser, TermQuery};
+use tantivy::schema::{IndexRecordOption, Schema, Value, INDEXED, STORED, STRING, TEXT};
+use tantivy::Term;
 use tantivy::{Index, IndexReader, IndexWriter, TantivyDocument};
 
 /// A single search result with relevance score and document metadata.
@@ -174,6 +175,92 @@ impl BM25Index {
             .search(&query, &TopDocs::with_limit(limit))
             .map_err(|e| Error::from_tantivy(e, "search failed"))?;
 
+        let mut results = Vec::with_capacity(top_docs.len());
+
+        for (score, doc_address) in top_docs {
+            let retrieved_doc: TantivyDocument = searcher
+                .doc(doc_address)
+                .map_err(|e| Error::from_tantivy(e, "failed to retrieve document"))?;
+
+            let mut result = self.extract_search_result(&retrieved_doc);
+            result.score = score;
+            results.push(result);
+        }
+
+        Ok(results)
+    }
+
+    /// Retrieves all messages for a given session, sorted by timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the search fails.
+    pub fn get_session_messages(&self, session_id: &str) -> Result<Vec<SearchResult>> {
+        let searcher = self.reader.searcher();
+
+        let session_id_field = self
+            .schema
+            .get_field("session_id")
+            .expect("session_id field exists");
+
+        let term = Term::from_field_text(session_id_field, session_id);
+        let query = TermQuery::new(term, IndexRecordOption::Basic);
+
+        // Get all docs for this session (up to a reasonable limit)
+        let top_docs = searcher
+            .search(&query, &TopDocs::with_limit(1000))
+            .map_err(|e| Error::from_tantivy(e, "session query failed"))?;
+
+        let mut results: Vec<SearchResult> = top_docs
+            .into_iter()
+            .filter_map(|(_, doc_address)| {
+                searcher.doc(doc_address).ok().map(|doc| {
+                    let mut result = self.extract_search_result(&doc);
+                    result.score = 0.0;
+                    result
+                })
+            })
+            .collect();
+
+        // Sort by timestamp
+        results.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        Ok(results)
+    }
+
+    /// Retrieves all messages (for getting context when `session_id` is unknown).
+    ///
+    /// This is expensive and should only be used when necessary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the search fails.
+    pub fn get_all_messages(&self) -> Result<Vec<SearchResult>> {
+        let searcher = self.reader.searcher();
+
+        let top_docs = searcher
+            .search(&AllQuery, &TopDocs::with_limit(100_000))
+            .map_err(|e| Error::from_tantivy(e, "all query failed"))?;
+
+        let mut results: Vec<SearchResult> = top_docs
+            .into_iter()
+            .filter_map(|(_, doc_address)| {
+                searcher.doc(doc_address).ok().map(|doc| {
+                    let mut result = self.extract_search_result(&doc);
+                    result.score = 0.0;
+                    result
+                })
+            })
+            .collect();
+
+        // Sort by timestamp
+        results.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        Ok(results)
+    }
+
+    /// Extracts a [`SearchResult`] from a [`TantivyDocument`].
+    fn extract_search_result(&self, doc: &TantivyDocument) -> SearchResult {
         let id_field = self.schema.get_field("id").expect("id field exists");
         let doc_type_field = self
             .schema
@@ -188,72 +275,66 @@ impl BM25Index {
             .get_field("session_id")
             .expect("session_id field exists");
         let role_field = self.schema.get_field("role").expect("role field exists");
+        let content_field = self
+            .schema
+            .get_field("content")
+            .expect("content field exists");
         let timestamp_field = self
             .schema
             .get_field("timestamp")
             .expect("timestamp field exists");
 
-        let mut results = Vec::with_capacity(top_docs.len());
+        let id = doc
+            .get_first(id_field)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
-        for (score, doc_address) in top_docs {
-            let retrieved_doc: TantivyDocument = searcher
-                .doc(doc_address)
-                .map_err(|e| Error::from_tantivy(e, "failed to retrieve document"))?;
+        let doc_type = doc
+            .get_first(doc_type_field)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
-            let id = retrieved_doc
-                .get_first(id_field)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+        let project = doc
+            .get_first(project_field)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
 
-            let doc_type = retrieved_doc
-                .get_first(doc_type_field)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+        let session_id = doc
+            .get_first(session_id_field)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
 
-            let project = retrieved_doc
-                .get_first(project_field)
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(String::from);
+        let role = doc
+            .get_first(role_field)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
 
-            let session_id = retrieved_doc
-                .get_first(session_id_field)
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(String::from);
+        let content = doc
+            .get_first(content_field)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
-            let role = retrieved_doc
-                .get_first(role_field)
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(String::from);
+        let timestamp = doc
+            .get_first(timestamp_field)
+            .and_then(|v| v.as_datetime())
+            .and_then(|dt| DateTime::<Utc>::from_timestamp_micros(dt.into_timestamp_micros()));
 
-            let content = retrieved_doc
-                .get_first(content_field)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            let timestamp = retrieved_doc
-                .get_first(timestamp_field)
-                .and_then(|v| v.as_datetime())
-                .and_then(|dt| DateTime::<Utc>::from_timestamp_micros(dt.into_timestamp_micros()));
-
-            results.push(SearchResult {
-                id,
-                doc_type,
-                project,
-                session_id,
-                role,
-                content,
-                score,
-                timestamp,
-            });
+        SearchResult {
+            id,
+            doc_type,
+            project,
+            session_id,
+            role,
+            content,
+            score: 0.0,
+            timestamp,
         }
-
-        Ok(results)
     }
 
     /// Returns the number of documents in the index.

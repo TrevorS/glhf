@@ -2,12 +2,24 @@
 
 use crate::config;
 use crate::error::Error;
-use crate::index::BM25Index;
+use crate::index::{BM25Index, SearchResult};
 use crate::ingest;
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
+
+/// Options for search command.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SearchOptions {
+    /// Maximum number of results to return.
+    pub limit: usize,
+    /// Number of messages to show before each match.
+    pub before: usize,
+    /// Number of messages to show after each match.
+    pub after: usize,
+}
 
 /// Builds or rebuilds the search index from all conversation files.
 pub fn index(_rebuild: bool) -> Result<()> {
@@ -56,7 +68,7 @@ pub fn index(_rebuild: bool) -> Result<()> {
 }
 
 /// Searches the index and prints results to stdout.
-pub fn search(query: &str, limit: usize) -> Result<()> {
+pub fn search(query: &str, options: SearchOptions) -> Result<()> {
     let index_path = config::bm25_index_dir()?;
 
     if !index_path.exists() {
@@ -64,38 +76,109 @@ pub fn search(query: &str, limit: usize) -> Result<()> {
     }
 
     let idx = BM25Index::open(&index_path).context("Failed to open index")?;
-    let results = idx.search(query, limit)?;
+    let results = idx.search(query, options.limit)?;
 
     if results.is_empty() {
         println!("No matches found for: {query}");
         return Ok(());
     }
 
+    let show_context = options.before > 0 || options.after > 0;
+
+    // If we need context, fetch session messages
+    let session_messages: HashMap<String, Vec<SearchResult>> = if show_context {
+        let mut sessions = HashMap::new();
+        for result in &results {
+            if let Some(session_id) = &result.session_id {
+                if !sessions.contains_key(session_id) {
+                    if let Ok(msgs) = idx.get_session_messages(session_id) {
+                        sessions.insert(session_id.clone(), msgs);
+                    }
+                }
+            }
+        }
+        sessions
+    } else {
+        HashMap::new()
+    };
+
     println!("Found {} results:\n", results.len());
 
     for (i, result) in results.iter().enumerate() {
-        let project_display = result.project.as_ref().map_or("unknown", |p| {
-            // Show just the last path component
-            p.rsplit('/').next().unwrap_or(p)
-        });
+        print_result_header(i + 1, result);
 
-        let role_display = result.role.as_deref().unwrap_or("?");
-
-        println!(
-            "[{}] {} | {} | {} | Score: {:.2}",
-            i + 1,
-            result.doc_type,
-            project_display,
-            role_display,
-            result.score
-        );
-
-        // Show snippet of content
-        let snippet = truncate_content(&result.content, 200);
-        println!("    \"{snippet}\"\n");
+        if show_context {
+            print_result_with_context(result, &options, &session_messages);
+        } else {
+            // Show snippet of content
+            let snippet = truncate_content(&result.content, 200);
+            println!("    \"{snippet}\"\n");
+        }
     }
 
     Ok(())
+}
+
+/// Prints the header for a search result.
+fn print_result_header(num: usize, result: &SearchResult) {
+    let project_display = result.project.as_ref().map_or("unknown", |p| {
+        // Show just the last path component
+        p.rsplit('/').next().unwrap_or(p)
+    });
+
+    let role_display = result.role.as_deref().unwrap_or("?");
+
+    println!(
+        "[{}] {} | {} | {} | Score: {:.2}",
+        num, result.doc_type, project_display, role_display, result.score
+    );
+}
+
+/// Prints a search result with context messages.
+fn print_result_with_context(
+    result: &SearchResult,
+    options: &SearchOptions,
+    session_messages: &HashMap<String, Vec<SearchResult>>,
+) {
+    let Some(session_id) = &result.session_id else {
+        // No session, just show the match
+        let snippet = truncate_content(&result.content, 200);
+        println!("    \"{snippet}\"\n");
+        return;
+    };
+
+    let Some(session_msgs) = session_messages.get(session_id) else {
+        // Couldn't find session messages, just show the match
+        let snippet = truncate_content(&result.content, 200);
+        println!("    \"{snippet}\"\n");
+        return;
+    };
+
+    // Find the position of this result in the session
+    let match_pos = session_msgs.iter().position(|m| m.id == result.id);
+
+    let Some(pos) = match_pos else {
+        // Couldn't find match in session, just show the match
+        let snippet = truncate_content(&result.content, 200);
+        println!("    \"{snippet}\"\n");
+        return;
+    };
+
+    // Calculate context range
+    let start = pos.saturating_sub(options.before);
+    let end = (pos + 1 + options.after).min(session_msgs.len());
+
+    // Print context messages
+    for (idx, msg) in session_msgs[start..end].iter().enumerate() {
+        let absolute_idx = start + idx;
+        let is_match = absolute_idx == pos;
+        let prefix = if is_match { ">>>" } else { "   " };
+        let role = msg.role.as_deref().unwrap_or("?");
+
+        let snippet = truncate_content(&msg.content, 150);
+        println!("{prefix} [{role}] \"{snippet}\"");
+    }
+    println!();
 }
 
 /// Prints index status information to stdout.
