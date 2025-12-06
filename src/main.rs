@@ -51,16 +51,16 @@ enum Commands {
         #[arg(short = 't', long = "tool", value_name = "NAME")]
         tool: Option<String>,
 
-        /// Only show tool results that were errors
+        /// Only show error results
         #[arg(long = "errors")]
         errors: bool,
 
-        /// Only show messages (exclude `tool_use` and `tool_result`)
-        #[arg(long = "messages-only")]
+        /// Only show messages (exclude tool calls)
+        #[arg(long = "messages-only", conflicts_with_all = ["tools_only", "tool"])]
         messages_only: bool,
 
-        /// Only show tool calls (`tool_use` and `tool_result`)
-        #[arg(long = "tools-only")]
+        /// Only show tool calls (exclude messages)
+        #[arg(long = "tools-only", conflicts_with = "messages_only")]
         tools_only: bool,
     },
 

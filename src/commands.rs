@@ -12,8 +12,8 @@ use std::path::Path;
 use std::time::Instant;
 
 /// Options for search command.
-#[derive(Debug, Clone, Default)]
 #[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Default)]
 pub struct SearchOptions {
     /// Maximum number of results to return.
     pub limit: usize,
@@ -25,13 +25,13 @@ pub struct SearchOptions {
     pub before: usize,
     /// Number of messages to show after each match.
     pub after: usize,
-    /// Filter by tool name (e.g., "Bash", "Read", "Edit").
+    /// Filter to a specific tool name (e.g., "Bash", "Read").
     pub tool: Option<String>,
-    /// Only show tool results that were errors.
+    /// Only show error results.
     pub errors: bool,
-    /// Only show messages (exclude `tool_use` and `tool_result`).
+    /// Only show message chunks (exclude tools).
     pub messages_only: bool,
-    /// Only show tool calls (`tool_use` and `tool_result`).
+    /// Only show tool chunks (exclude messages).
     pub tools_only: bool,
 }
 
@@ -91,24 +91,28 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
 
     let idx = BM25Index::open(&index_path).context("Failed to open index")?;
 
-    // Determine chunk_kind filter based on options
-    let chunk_kind_filter = if options.messages_only {
-        Some(ChunkKind::Message)
-    } else if options.tools_only {
-        // For tools_only, we don't filter by a single kind - we'll filter after
-        None
-    } else {
-        None
-    };
+    // Determine chunk_kind filter (tools_only is post-filtered after search)
+    let chunk_kind = options.messages_only.then_some(ChunkKind::Message);
 
-    // Perform the search
+    // Check if we need filtering
+    let has_filters = options.tool.is_some()
+        || options.errors
+        || options.messages_only
+        || options.tools_only;
+
     let mut results = if options.regex {
-        idx.search_regex(query, options.limit * 2, options.ignore_case)?
-    } else if options.tool.is_some() || chunk_kind_filter.is_some() || options.errors {
+        let mut results = idx.search_regex(query, options.limit * 2, options.ignore_case)?;
+        // Post-filter for regex since it doesn't use Tantivy filters
+        if has_filters {
+            results.retain(|r| filter_result(r, options));
+        }
+        results.truncate(options.limit);
+        results
+    } else if has_filters {
         idx.search_filtered(
             query,
-            options.limit * 2, // Get extra to filter
-            chunk_kind_filter,
+            options.limit,
+            chunk_kind,
             options.tool.as_deref(),
             options.errors,
         )?
@@ -116,31 +120,10 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         idx.search(query, options.limit)?
     };
 
-    // Apply additional filters
+    // Additional filtering for tools_only (exclude messages)
     if options.tools_only {
         results.retain(|r| r.chunk_kind != "message");
     }
-
-    if options.regex
-        && (options.tool.is_some() || options.errors || options.messages_only || options.tools_only)
-    {
-        // Regex search doesn't use filters, so apply them manually
-        if let Some(tool_name) = &options.tool {
-            results.retain(|r| r.tool_name.as_deref() == Some(tool_name.as_str()));
-        }
-        if options.errors {
-            results.retain(|r| r.is_error == Some(true));
-        }
-        if options.messages_only {
-            results.retain(|r| r.chunk_kind == "message");
-        }
-        if options.tools_only {
-            results.retain(|r| r.chunk_kind != "message");
-        }
-    }
-
-    // Limit results
-    results.truncate(options.limit);
 
     if results.is_empty() {
         println!("No matches found for: {query}");
@@ -266,6 +249,34 @@ pub fn status() -> Result<()> {
     println!("Location: {}", index_path.display());
 
     Ok(())
+}
+
+/// Filters a search result based on options.
+fn filter_result(result: &SearchResult, options: &SearchOptions) -> bool {
+    // Filter by messages_only
+    if options.messages_only && result.chunk_kind != "message" {
+        return false;
+    }
+
+    // Filter by tools_only
+    if options.tools_only && result.chunk_kind == "message" {
+        return false;
+    }
+
+    // Filter by tool name
+    if let Some(ref tool) = options.tool {
+        match &result.tool_name {
+            Some(name) if name.eq_ignore_ascii_case(tool) => {}
+            _ => return false,
+        }
+    }
+
+    // Filter by errors
+    if options.errors && result.is_error != Some(true) {
+        return false;
+    }
+
+    true
 }
 
 /// Calculate directory size in bytes.
