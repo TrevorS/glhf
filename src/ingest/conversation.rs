@@ -1,8 +1,8 @@
 //! Conversation JSONL file parsing.
 
+use crate::error::Result;
 use crate::ingest::extract_project_from_path;
 use crate::models::document::{DocType, Document};
-use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::fs::File;
@@ -22,23 +22,19 @@ pub fn parse_jsonl_file(path: &Path) -> Result<Vec<Document>> {
     let project = extract_project_from_path(path);
 
     for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+        let Ok(line) = line else { continue };
 
         if line.trim().is_empty() {
             continue;
         }
 
-        let value: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
+        let Ok(value): std::result::Result<Value, _> = serde_json::from_str(&line) else {
+            continue;
         };
 
         // Only process user/assistant messages
         let msg_type = value.get("type").and_then(|v| v.as_str());
-        if !matches!(msg_type, Some("user") | Some("assistant")) {
+        if !matches!(msg_type, Some("user" | "assistant")) {
             continue;
         }
 
@@ -78,16 +74,14 @@ pub fn parse_jsonl_file(path: &Path) -> Result<Vec<Document>> {
     Ok(documents)
 }
 
-/// Extracts text content from a message, handling both string and array formats
+/// Extracts text content from a message, handling both string and array formats.
 fn extract_message_content(value: &Value) -> String {
-    let message = match value.get("message") {
-        Some(m) => m,
-        None => return String::new(),
+    let Some(message) = value.get("message") else {
+        return String::new();
     };
 
-    let content = match message.get("content") {
-        Some(c) => c,
-        None => return String::new(),
+    let Some(content) = message.get("content") else {
+        return String::new();
     };
 
     match content {
@@ -104,7 +98,7 @@ fn extract_message_content(value: &Value) -> String {
     }
 }
 
-/// Extracts text from a content block
+/// Extracts text from a content block.
 fn extract_text_from_block(block: &Value) -> Option<String> {
     // Try "text" field first (common for text blocks)
     if let Some(text) = block.get("text").and_then(|v| v.as_str()) {

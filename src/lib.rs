@@ -30,8 +30,10 @@
 
 pub mod commands;
 pub mod config;
+pub mod error;
 pub mod index;
 pub mod ingest;
 pub mod models;
 
+pub use error::{Error, Result};
 pub use models::document::{DocType, Document};

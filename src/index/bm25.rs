@@ -1,17 +1,17 @@
 //! BM25 full-text search index implementation.
 
+use crate::error::{Error, Result};
 use crate::models::document::Document;
-use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::fs;
 use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::*;
+use tantivy::schema::{Schema, Value, INDEXED, STORED, STRING, TEXT};
 use tantivy::{Index, IndexReader, IndexWriter, TantivyDocument};
 
 /// A single search result with relevance score and document metadata.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SearchResult {
     /// Unique document identifier.
     pub id: String,
@@ -42,20 +42,25 @@ pub struct BM25Index {
 }
 
 impl BM25Index {
-    /// Creates a new index at the specified path
+    /// Creates a new index at the specified path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created or the index
+    /// cannot be initialized.
     pub fn create(path: &Path) -> Result<Self> {
         // Ensure directory exists
         fs::create_dir_all(path)?;
 
         let schema = build_schema();
-        let index =
-            Index::create_in_dir(path, schema.clone()).context("Failed to create tantivy index")?;
+        let index = Index::create_in_dir(path, schema.clone())
+            .map_err(|e| Error::from_tantivy(e, "failed to create index"))?;
 
         let reader = index
             .reader_builder()
             .reload_policy(tantivy::ReloadPolicy::OnCommitWithDelay)
             .try_into()
-            .context("Failed to create index reader")?;
+            .map_err(|e| Error::from_tantivy(e, "failed to create index reader"))?;
 
         Ok(Self {
             index,
@@ -64,16 +69,21 @@ impl BM25Index {
         })
     }
 
-    /// Opens an existing index at the specified path
+    /// Opens an existing index at the specified path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the index cannot be opened.
     pub fn open(path: &Path) -> Result<Self> {
-        let index = Index::open_in_dir(path).context("Failed to open tantivy index")?;
+        let index =
+            Index::open_in_dir(path).map_err(|e| Error::from_tantivy(e, "failed to open index"))?;
 
         let schema = index.schema();
         let reader = index
             .reader_builder()
             .reload_policy(tantivy::ReloadPolicy::OnCommitWithDelay)
             .try_into()
-            .context("Failed to create index reader")?;
+            .map_err(|e| Error::from_tantivy(e, "failed to create index reader"))?;
 
         Ok(Self {
             index,
@@ -82,23 +92,46 @@ impl BM25Index {
         })
     }
 
-    /// Creates a writer for adding documents
+    /// Creates a writer for adding documents.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the writer cannot be created.
     pub fn writer(&self) -> Result<IndexWriter> {
         // 50MB heap for the writer
         self.index
             .writer(50_000_000)
-            .context("Failed to create index writer")
+            .map_err(|e| Error::from_tantivy(e, "failed to create index writer"))
     }
 
-    /// Adds documents to the index
+    /// Adds documents to the index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a document cannot be added.
     pub fn add_documents(&self, writer: &mut IndexWriter, docs: &[Document]) -> Result<()> {
-        let id_field = self.schema.get_field("id").unwrap();
-        let doc_type_field = self.schema.get_field("doc_type").unwrap();
-        let project_field = self.schema.get_field("project").unwrap();
-        let session_id_field = self.schema.get_field("session_id").unwrap();
-        let role_field = self.schema.get_field("role").unwrap();
-        let content_field = self.schema.get_field("content").unwrap();
-        let timestamp_field = self.schema.get_field("timestamp").unwrap();
+        let id_field = self.schema.get_field("id").expect("id field exists");
+        let doc_type_field = self
+            .schema
+            .get_field("doc_type")
+            .expect("doc_type field exists");
+        let project_field = self
+            .schema
+            .get_field("project")
+            .expect("project field exists");
+        let session_id_field = self
+            .schema
+            .get_field("session_id")
+            .expect("session_id field exists");
+        let role_field = self.schema.get_field("role").expect("role field exists");
+        let content_field = self
+            .schema
+            .get_field("content")
+            .expect("content field exists");
+        let timestamp_field = self
+            .schema
+            .get_field("timestamp")
+            .expect("timestamp field exists");
 
         for doc in docs {
             let mut tantivy_doc = TantivyDocument::new();
@@ -114,37 +147,58 @@ impl BM25Index {
                 tantivy_doc.add_date(timestamp_field, dt);
             }
 
-            writer.add_document(tantivy_doc)?;
+            writer
+                .add_document(tantivy_doc)
+                .map_err(|e| Error::from_tantivy(e, "failed to add document"))?;
         }
 
         Ok(())
     }
 
-    /// Searches the index
+    /// Searches the index for documents matching the query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query cannot be parsed or the search fails.
     pub fn search(&self, query_str: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let searcher = self.reader.searcher();
 
-        let content_field = self.schema.get_field("content").unwrap();
+        let content_field = self
+            .schema
+            .get_field("content")
+            .expect("content field exists");
         let query_parser = QueryParser::for_index(&self.index, vec![content_field]);
-        let query = query_parser
-            .parse_query(query_str)
-            .context("Failed to parse query")?;
+        let query = query_parser.parse_query(query_str)?;
 
         let top_docs = searcher
             .search(&query, &TopDocs::with_limit(limit))
-            .context("Search failed")?;
+            .map_err(|e| Error::from_tantivy(e, "search failed"))?;
 
-        let id_field = self.schema.get_field("id").unwrap();
-        let doc_type_field = self.schema.get_field("doc_type").unwrap();
-        let project_field = self.schema.get_field("project").unwrap();
-        let session_id_field = self.schema.get_field("session_id").unwrap();
-        let role_field = self.schema.get_field("role").unwrap();
-        let timestamp_field = self.schema.get_field("timestamp").unwrap();
+        let id_field = self.schema.get_field("id").expect("id field exists");
+        let doc_type_field = self
+            .schema
+            .get_field("doc_type")
+            .expect("doc_type field exists");
+        let project_field = self
+            .schema
+            .get_field("project")
+            .expect("project field exists");
+        let session_id_field = self
+            .schema
+            .get_field("session_id")
+            .expect("session_id field exists");
+        let role_field = self.schema.get_field("role").expect("role field exists");
+        let timestamp_field = self
+            .schema
+            .get_field("timestamp")
+            .expect("timestamp field exists");
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(top_docs.len());
 
         for (score, doc_address) in top_docs {
-            let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
+            let retrieved_doc: TantivyDocument = searcher
+                .doc(doc_address)
+                .map_err(|e| Error::from_tantivy(e, "failed to retrieve document"))?;
 
             let id = retrieved_doc
                 .get_first(id_field)
@@ -185,10 +239,7 @@ impl BM25Index {
             let timestamp = retrieved_doc
                 .get_first(timestamp_field)
                 .and_then(|v| v.as_datetime())
-                .map(|dt| {
-                    DateTime::<Utc>::from_timestamp_micros(dt.into_timestamp_micros())
-                        .unwrap_or_default()
-                });
+                .and_then(|dt| DateTime::<Utc>::from_timestamp_micros(dt.into_timestamp_micros()));
 
             results.push(SearchResult {
                 id,
@@ -205,14 +256,21 @@ impl BM25Index {
         Ok(results)
     }
 
-    /// Returns the number of documents in the index
+    /// Returns the number of documents in the index.
+    #[must_use]
     pub fn num_docs(&self) -> u64 {
         self.reader.searcher().num_docs()
     }
 
-    /// Manually reload the reader to see recent commits
+    /// Manually reload the reader to see recent commits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reader cannot be reloaded.
     pub fn reload(&self) -> Result<()> {
-        self.reader.reload().context("Failed to reload reader")
+        self.reader
+            .reload()
+            .map_err(|e| Error::from_tantivy(e, "failed to reload reader"))
     }
 }
 

@@ -1,15 +1,17 @@
 //! CLI command implementations.
 
 use crate::config;
+use crate::error::Error;
 use crate::index::BM25Index;
 use crate::ingest;
 use anyhow::{Context, Result};
 use std::fs;
+use std::path::Path;
 use std::time::Instant;
 
 /// Builds or rebuilds the search index from all conversation files.
 pub fn index(_rebuild: bool) -> Result<()> {
-    let index_path = config::bm25_index_dir();
+    let index_path = config::bm25_index_dir()?;
 
     // Always rebuild until we have proper incremental updates
     if index_path.exists() {
@@ -28,7 +30,7 @@ pub fn index(_rebuild: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("Found {} documents. Building index...", doc_count);
+    println!("Found {doc_count} documents. Building index...");
 
     // Create fresh index
     let idx = BM25Index::create(&index_path)?;
@@ -55,32 +57,27 @@ pub fn index(_rebuild: bool) -> Result<()> {
 
 /// Searches the index and prints results to stdout.
 pub fn search(query: &str, limit: usize) -> Result<()> {
-    let index_path = config::bm25_index_dir();
+    let index_path = config::bm25_index_dir()?;
 
     if !index_path.exists() {
-        eprintln!("No index found. Run 'glhf index' first.");
-        std::process::exit(1);
+        return Err(Error::IndexNotFound { path: index_path }.into());
     }
 
     let idx = BM25Index::open(&index_path).context("Failed to open index")?;
     let results = idx.search(query, limit)?;
 
     if results.is_empty() {
-        println!("No matches found for: {}", query);
+        println!("No matches found for: {query}");
         return Ok(());
     }
 
     println!("Found {} results:\n", results.len());
 
     for (i, result) in results.iter().enumerate() {
-        let project_display = result
-            .project
-            .as_ref()
-            .map(|p| {
-                // Show just the last path component
-                p.rsplit('/').next().unwrap_or(p)
-            })
-            .unwrap_or("unknown");
+        let project_display = result.project.as_ref().map_or("unknown", |p| {
+            // Show just the last path component
+            p.rsplit('/').next().unwrap_or(p)
+        });
 
         let role_display = result.role.as_deref().unwrap_or("?");
 
@@ -95,7 +92,7 @@ pub fn search(query: &str, limit: usize) -> Result<()> {
 
         // Show snippet of content
         let snippet = truncate_content(&result.content, 200);
-        println!("    \"{}\"\n", snippet);
+        println!("    \"{snippet}\"\n");
     }
 
     Ok(())
@@ -103,7 +100,7 @@ pub fn search(query: &str, limit: usize) -> Result<()> {
 
 /// Prints index status information to stdout.
 pub fn status() -> Result<()> {
-    let index_path = config::bm25_index_dir();
+    let index_path = config::bm25_index_dir()?;
 
     if !index_path.exists() {
         println!("No index found.");
@@ -117,19 +114,19 @@ pub fn status() -> Result<()> {
 
     println!("Index Status");
     println!("------------");
-    println!("Documents: {}", doc_count);
+    println!("Documents: {doc_count}");
     println!("Size: {}", format_size(size));
     println!("Location: {}", index_path.display());
 
     Ok(())
 }
 
-/// Calculate directory size in bytes
-fn dir_size(path: &std::path::Path) -> Result<u64> {
+/// Calculate directory size in bytes.
+fn dir_size(path: &Path) -> Result<u64> {
     let mut size = 0;
     for entry in walkdir::WalkDir::new(path)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
     {
         if entry.file_type().is_file() {
             size += entry.metadata()?.len();
@@ -138,7 +135,7 @@ fn dir_size(path: &std::path::Path) -> Result<u64> {
     Ok(size)
 }
 
-/// Format bytes as human-readable size
+/// Format bytes as human-readable size.
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -151,11 +148,11 @@ fn format_size(bytes: u64) -> String {
     } else if bytes >= KB {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 
-/// Truncate content to max length, breaking at word boundary
+/// Truncate content to max length, breaking at word boundary.
 fn truncate_content(content: &str, max_len: usize) -> String {
     // Normalize whitespace
     let words: Vec<&str> = content.split_whitespace().collect();
@@ -192,6 +189,6 @@ fn truncate_content(content: &str, max_len: usize) -> String {
             normalized.chars().take(max_len).collect::<String>()
         )
     } else {
-        format!("{}...", result)
+        format!("{result}...")
     }
 }

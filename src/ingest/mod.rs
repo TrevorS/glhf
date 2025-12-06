@@ -8,39 +8,47 @@ mod conversation;
 pub use conversation::parse_jsonl_file;
 
 use crate::config;
+use crate::error::Result;
 use crate::Document;
-use anyhow::Result;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 /// Discovers all conversation JSONL files in `~/.claude/projects`.
+///
+/// # Errors
+///
+/// Returns an error if the projects directory cannot be determined.
 pub fn discover_conversation_files() -> Result<Vec<PathBuf>> {
-    let projects_dir = config::projects_dir();
+    let projects_dir = config::projects_dir()?;
 
     if !projects_dir.exists() {
         return Ok(Vec::new());
     }
 
-    let mut files = Vec::new();
-
-    for entry in WalkDir::new(&projects_dir)
+    let files = WalkDir::new(&projects_dir)
         .follow_links(true)
         .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if path.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
-            files.push(path.to_path_buf());
-        }
-    }
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            entry.path().is_file() && entry.path().extension().is_some_and(|ext| ext == "jsonl")
+        })
+        .map(walkdir::DirEntry::into_path)
+        .collect();
 
     Ok(files)
 }
 
-/// Ingests all conversation files and returns Documents
+/// Ingests all conversation files and returns Documents.
+///
+/// Parse errors for individual files are logged to stderr but do not
+/// cause the entire operation to fail.
+///
+/// # Errors
+///
+/// Returns an error if the projects directory cannot be determined.
 pub fn ingest_all() -> Result<Vec<Document>> {
     let files = discover_conversation_files()?;
-    let mut all_docs = Vec::new();
+    let mut all_docs = Vec::with_capacity(files.len() * 10); // Estimate ~10 docs per file
 
     for file_path in files {
         match parse_jsonl_file(&file_path) {
@@ -56,10 +64,13 @@ pub fn ingest_all() -> Result<Vec<Document>> {
     Ok(all_docs)
 }
 
-/// Extracts the project name from a JSONL file path
+/// Extracts the project name from a JSONL file path.
+///
+/// Returns `None` if the path is not under the projects directory or
+/// if the projects directory cannot be determined.
 pub fn extract_project_from_path(path: &Path) -> Option<String> {
     // Path format: ~/.claude/projects/-Users-trevor-Projects-foo/session.jsonl
-    let projects_dir = config::projects_dir();
+    let projects_dir = config::projects_dir().ok()?;
 
     path.strip_prefix(&projects_dir)
         .ok()
