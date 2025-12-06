@@ -6,12 +6,11 @@ use std::fs;
 use std::time::Instant;
 
 /// Build or update the search index
-pub fn index(rebuild: bool) -> Result<()> {
+pub fn index(_rebuild: bool) -> Result<()> {
     let index_path = config::bm25_index_dir();
 
-    // Check if we need to rebuild
-    if rebuild && index_path.exists() {
-        println!("Removing existing index...");
+    // Always rebuild until we have proper incremental updates
+    if index_path.exists() {
         fs::remove_dir_all(&index_path)?;
     }
 
@@ -29,12 +28,8 @@ pub fn index(rebuild: bool) -> Result<()> {
 
     println!("Found {} documents. Building index...", doc_count);
 
-    // Create or open index
-    let idx = if index_path.exists() && !rebuild {
-        BM25Index::open(&index_path)?
-    } else {
-        BM25Index::create(&index_path)?
-    };
+    // Create fresh index
+    let idx = BM25Index::create(&index_path)?;
 
     // Add documents
     let mut writer = idx.writer()?;
