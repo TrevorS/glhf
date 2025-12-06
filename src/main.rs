@@ -46,6 +46,22 @@ enum Commands {
         /// Show N messages before and after each match (like grep -C)
         #[arg(short = 'C', long = "context", value_name = "NUM")]
         context: Option<usize>,
+
+        /// Filter by tool name (e.g., Bash, Read, Edit, Grep)
+        #[arg(short = 't', long = "tool", value_name = "NAME")]
+        tool: Option<String>,
+
+        /// Only show tool results that were errors
+        #[arg(long = "errors")]
+        errors: bool,
+
+        /// Only show messages (exclude `tool_use` and `tool_result`)
+        #[arg(long = "messages-only")]
+        messages_only: bool,
+
+        /// Only show tool calls (`tool_use` and `tool_result`)
+        #[arg(long = "tools-only")]
+        tools_only: bool,
     },
 
     /// Show index status and statistics
@@ -67,6 +83,10 @@ fn main() -> Result<()> {
             after,
             before,
             context,
+            tool,
+            errors,
+            messages_only,
+            tools_only,
         } => {
             let options = SearchOptions {
                 limit,
@@ -74,8 +94,12 @@ fn main() -> Result<()> {
                 ignore_case,
                 before: context.or(before).unwrap_or(0),
                 after: context.or(after).unwrap_or(0),
+                tool,
+                errors,
+                messages_only,
+                tools_only,
             };
-            glhf::commands::search(&query, options)?;
+            glhf::commands::search(&query, &options)?;
         }
         Commands::Status => {
             glhf::commands::status()?;

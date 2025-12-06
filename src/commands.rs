@@ -4,6 +4,7 @@ use crate::config;
 use crate::error::Error;
 use crate::index::{BM25Index, SearchResult};
 use crate::ingest;
+use crate::models::document::ChunkKind;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
@@ -11,7 +12,8 @@ use std::path::Path;
 use std::time::Instant;
 
 /// Options for search command.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct SearchOptions {
     /// Maximum number of results to return.
     pub limit: usize,
@@ -23,6 +25,14 @@ pub struct SearchOptions {
     pub before: usize,
     /// Number of messages to show after each match.
     pub after: usize,
+    /// Filter by tool name (e.g., "Bash", "Read", "Edit").
+    pub tool: Option<String>,
+    /// Only show tool results that were errors.
+    pub errors: bool,
+    /// Only show messages (exclude `tool_use` and `tool_result`).
+    pub messages_only: bool,
+    /// Only show tool calls (`tool_use` and `tool_result`).
+    pub tools_only: bool,
 }
 
 /// Builds or rebuilds the search index from all conversation files.
@@ -72,7 +82,7 @@ pub fn index(_rebuild: bool) -> Result<()> {
 }
 
 /// Searches the index and prints results to stdout.
-pub fn search(query: &str, options: SearchOptions) -> Result<()> {
+pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
     let index_path = config::bm25_index_dir()?;
 
     if !index_path.exists() {
@@ -81,11 +91,56 @@ pub fn search(query: &str, options: SearchOptions) -> Result<()> {
 
     let idx = BM25Index::open(&index_path).context("Failed to open index")?;
 
-    let results = if options.regex {
-        idx.search_regex(query, options.limit, options.ignore_case)?
+    // Determine chunk_kind filter based on options
+    let chunk_kind_filter = if options.messages_only {
+        Some(ChunkKind::Message)
+    } else if options.tools_only {
+        // For tools_only, we don't filter by a single kind - we'll filter after
+        None
+    } else {
+        None
+    };
+
+    // Perform the search
+    let mut results = if options.regex {
+        idx.search_regex(query, options.limit * 2, options.ignore_case)?
+    } else if options.tool.is_some() || chunk_kind_filter.is_some() || options.errors {
+        idx.search_filtered(
+            query,
+            options.limit * 2, // Get extra to filter
+            chunk_kind_filter,
+            options.tool.as_deref(),
+            options.errors,
+        )?
     } else {
         idx.search(query, options.limit)?
     };
+
+    // Apply additional filters
+    if options.tools_only {
+        results.retain(|r| r.chunk_kind != "message");
+    }
+
+    if options.regex
+        && (options.tool.is_some() || options.errors || options.messages_only || options.tools_only)
+    {
+        // Regex search doesn't use filters, so apply them manually
+        if let Some(tool_name) = &options.tool {
+            results.retain(|r| r.tool_name.as_deref() == Some(tool_name.as_str()));
+        }
+        if options.errors {
+            results.retain(|r| r.is_error == Some(true));
+        }
+        if options.messages_only {
+            results.retain(|r| r.chunk_kind == "message");
+        }
+        if options.tools_only {
+            results.retain(|r| r.chunk_kind != "message");
+        }
+    }
+
+    // Limit results
+    results.truncate(options.limit);
 
     if results.is_empty() {
         println!("No matches found for: {query}");
@@ -117,7 +172,7 @@ pub fn search(query: &str, options: SearchOptions) -> Result<()> {
         print_result_header(i + 1, result);
 
         if show_context {
-            print_result_with_context(result, &options, &session_messages);
+            print_result_with_context(result, options, &session_messages);
         } else {
             // Show snippet of content
             let snippet = truncate_content(&result.content, 200);
