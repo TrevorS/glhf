@@ -1,3 +1,5 @@
+//! BM25 full-text search index implementation.
+
 use crate::models::document::Document;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -8,20 +10,31 @@ use tantivy::query::QueryParser;
 use tantivy::schema::*;
 use tantivy::{Index, IndexReader, IndexWriter, TantivyDocument};
 
-/// Search result from BM25 index
+/// A single search result with relevance score and document metadata.
 #[derive(Debug)]
 pub struct SearchResult {
+    /// Unique document identifier.
     pub id: String,
+    /// The type of document ("conversation", etc.).
     pub doc_type: String,
+    /// The project path this document belongs to.
     pub project: Option<String>,
+    /// The Claude Code session ID.
     pub session_id: Option<String>,
+    /// The message role ("user" or "assistant").
     pub role: Option<String>,
+    /// The full document content.
     pub content: String,
+    /// BM25 relevance score (higher is more relevant).
     pub score: f32,
+    /// When this message was created.
     pub timestamp: Option<DateTime<Utc>>,
 }
 
-/// BM25 full-text search index backed by Tantivy
+/// BM25 full-text search index backed by [Tantivy](https://github.com/quickwit-oss/tantivy).
+///
+/// This index stores conversation documents and provides fast full-text search
+/// using the BM25 ranking algorithm.
 pub struct BM25Index {
     index: Index,
     schema: Schema,
@@ -195,6 +208,11 @@ impl BM25Index {
     /// Returns the number of documents in the index
     pub fn num_docs(&self) -> u64 {
         self.reader.searcher().num_docs()
+    }
+
+    /// Manually reload the reader to see recent commits
+    pub fn reload(&self) -> Result<()> {
+        self.reader.reload().context("Failed to reload reader")
     }
 }
 

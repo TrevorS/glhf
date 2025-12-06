@@ -1,4 +1,4 @@
-.PHONY: help build release install clean test lint fmt check
+.PHONY: help build release install clean test lint fmt check bench
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -17,6 +17,9 @@ clean: ## Remove build artifacts
 
 test: ## Run tests
 	cargo test
+
+bench: ## Run benchmarks
+	cargo bench
 
 lint: ## Run clippy
 	cargo clippy -- -D warnings

@@ -1,3 +1,8 @@
+//! Document ingestion from Claude Code data files.
+//!
+//! This module handles discovering and parsing conversation files from
+//! the `~/.claude/projects` directory structure.
+
 mod conversation;
 
 pub use conversation::parse_jsonl_file;
@@ -8,7 +13,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-/// Discovers all conversation JSONL files in ~/.claude/projects
+/// Discovers all conversation JSONL files in `~/.claude/projects`.
 pub fn discover_conversation_files() -> Result<Vec<PathBuf>> {
     let projects_dir = config::projects_dir();
 

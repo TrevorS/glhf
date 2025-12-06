@@ -1,1 +1,18 @@
+# Build artifacts
 /target
+
+# Cargo lock (binary, so include it; but listed here for awareness)
+# Cargo.lock
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Benchmark artifacts
+/target/criterion

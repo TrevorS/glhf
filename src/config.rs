@@ -1,25 +1,30 @@
+//! Configuration and path utilities.
+//!
+//! This module provides paths to Claude Code data directories and the glhf
+//! index location.
+
 use std::path::PathBuf;
 
-/// Returns the Claude Code data directory (~/.claude)
+/// Returns the Claude Code data directory (`~/.claude`).
 pub fn claude_dir() -> PathBuf {
     dirs::home_dir()
         .expect("Could not find home directory")
         .join(".claude")
 }
 
-/// Returns the glhf cache/index directory (~/.cache/glhf)
+/// Returns the glhf cache/index directory (`~/.cache/glhf`).
 pub fn index_dir() -> PathBuf {
     dirs::cache_dir()
         .expect("Could not find cache directory")
         .join("glhf")
 }
 
-/// Returns the BM25 index directory
+/// Returns the BM25 index directory (`~/.cache/glhf/bm25`).
 pub fn bm25_index_dir() -> PathBuf {
     index_dir().join("bm25")
 }
 
-/// Returns the projects directory containing conversation JSONL files
+/// Returns the projects directory containing conversation JSONL files (`~/.claude/projects`).
 pub fn projects_dir() -> PathBuf {
     claude_dir().join("projects")
 }

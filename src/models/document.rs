@@ -1,10 +1,14 @@
+//! Document types for indexed content.
+
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+/// The type of document being indexed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocType {
+    /// A conversation message (user or assistant).
     Conversation,
     // Future: Todo, Plan, History, Debug
 }
@@ -25,15 +29,27 @@ impl DocType {
     }
 }
 
+/// A document to be indexed and searched.
+///
+/// Documents are created from parsed conversation files and contain
+/// both the searchable content and metadata for filtering/display.
 #[derive(Debug, Clone)]
 pub struct Document {
+    /// Unique identifier derived from source path and content hash.
     pub id: String,
+    /// The type of document (conversation, todo, etc.).
     pub doc_type: DocType,
+    /// The project path this document belongs to.
     pub project: Option<String>,
+    /// When this message was created.
     pub timestamp: Option<DateTime<Utc>>,
+    /// The Claude Code session ID.
     pub session_id: Option<String>,
+    /// The message role ("user" or "assistant").
     pub role: Option<String>,
+    /// The searchable text content.
     pub content: String,
+    /// Path to the source file this document was extracted from.
     pub source_path: PathBuf,
 }
 

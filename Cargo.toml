@@ -15,3 +15,11 @@ sha2 = "0.10"
 tantivy = "0.25"
 thiserror = "2"
 walkdir = "2"
+
+[dev-dependencies]
+criterion = { version = "0.8.0", features = ["html_reports"] }
+tempfile = "3"
+
+[[bench]]
+name = "indexing"
+harness = false

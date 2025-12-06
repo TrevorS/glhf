@@ -1,3 +1,5 @@
+//! Conversation JSONL file parsing.
+
 use crate::ingest::extract_project_from_path;
 use crate::models::document::{DocType, Document};
 use anyhow::Result;
@@ -7,7 +9,11 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-/// Parses a conversation JSONL file into Documents
+/// Parses a conversation JSONL file into [`Document`]s.
+///
+/// Each line in the file is expected to be a JSON object. Only lines with
+/// `type` of "user" or "assistant" are processed; other types (like
+/// "file-history-snapshot") are skipped. Malformed JSON lines are also skipped.
 pub fn parse_jsonl_file(path: &Path) -> Result<Vec<Document>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);

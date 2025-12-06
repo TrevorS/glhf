@@ -1,3 +1,5 @@
+//! CLI command implementations.
+
 use crate::config;
 use crate::index::BM25Index;
 use crate::ingest;
@@ -5,7 +7,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::time::Instant;
 
-/// Build or update the search index
+/// Builds or rebuilds the search index from all conversation files.
 pub fn index(_rebuild: bool) -> Result<()> {
     let index_path = config::bm25_index_dir();
 
@@ -51,7 +53,7 @@ pub fn index(_rebuild: bool) -> Result<()> {
     Ok(())
 }
 
-/// Search the index
+/// Searches the index and prints results to stdout.
 pub fn search(query: &str, limit: usize) -> Result<()> {
     let index_path = config::bm25_index_dir();
 
@@ -99,7 +101,7 @@ pub fn search(query: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
-/// Show index status
+/// Prints index status information to stdout.
 pub fn status() -> Result<()> {
     let index_path = config::bm25_index_dir();
 
