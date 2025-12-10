@@ -25,19 +25,16 @@ pub enum Error {
     #[error("JSON parse error: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// An index operation failed.
-    #[error("index error: {message}")]
-    Index {
+    /// A database operation failed.
+    #[error("database error: {0}")]
+    Database(#[from] rusqlite::Error),
+
+    /// An embedding operation failed.
+    #[error("embedding error: {message}")]
+    Embedding {
         /// A description of what went wrong.
         message: String,
-        /// The underlying Tantivy error, if available.
-        #[source]
-        source: Option<tantivy::TantivyError>,
     },
-
-    /// Failed to parse a search query.
-    #[error("invalid search query: {0}")]
-    QueryParse(#[from] tantivy::query::QueryParserError),
 
     /// Failed to parse a file.
     #[error("failed to parse {path}: {message}")]
@@ -48,10 +45,10 @@ pub enum Error {
         message: String,
     },
 
-    /// The search index was not found.
-    #[error("no index found at {path}; run 'glhf index' first")]
-    IndexNotFound {
-        /// The path where the index was expected.
+    /// The database was not found.
+    #[error("no database found at {path}; run 'glhf index' first")]
+    DatabaseNotFound {
+        /// The path where the database was expected.
         path: PathBuf,
     },
 
@@ -61,19 +58,10 @@ pub enum Error {
 }
 
 impl Error {
-    /// Creates a new index error with the given message.
-    pub fn index(message: impl Into<String>) -> Self {
-        Self::Index {
+    /// Creates a new embedding error with the given message.
+    pub fn embedding(message: impl Into<String>) -> Self {
+        Self::Embedding {
             message: message.into(),
-            source: None,
-        }
-    }
-
-    /// Creates a new index error from a Tantivy error.
-    pub fn from_tantivy(err: tantivy::TantivyError, message: impl Into<String>) -> Self {
-        Self::Index {
-            message: message.into(),
-            source: Some(err),
         }
     }
 

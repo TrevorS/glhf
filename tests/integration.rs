@@ -1,7 +1,7 @@
 mod common;
 
 use common::*;
-use glhf::index::BM25Index;
+use glhf::db::Database;
 use glhf::ingest::parse_jsonl_file;
 use glhf::models::document::{ChunkKind, Document};
 use std::path::PathBuf;
@@ -81,8 +81,9 @@ fn test_handle_malformed_json_gracefully() {
 }
 
 #[test]
-fn test_index_and_search() {
+fn test_database_insert_and_search() {
     let env = TestEnv::new();
+    let db_path = env.index_dir.join("test.db");
 
     // Create some documents
     let docs = vec![
@@ -106,33 +107,32 @@ fn test_index_and_search() {
         .with_role(Some("user".to_string())),
     ];
 
-    // Create index
-    let index = BM25Index::create(&env.index_dir).expect("Failed to create index");
-    let mut writer = index.writer().expect("Failed to create writer");
-    index
-        .add_documents(&mut writer, &docs)
-        .expect("Failed to add documents");
-    writer.commit().expect("Failed to commit");
-    index.reload().expect("Failed to reload reader");
+    // Create database and insert
+    let mut db = Database::open(&db_path).expect("Failed to create database");
+    db.insert_documents(&docs)
+        .expect("Failed to insert documents");
 
     // Search for Rust
-    let results = index.search("Rust programming", 10).expect("Search failed");
+    let results = db.search_fts("Rust", 10).expect("Search failed");
     assert!(!results.is_empty());
     assert!(results[0].content.contains("Rust"));
 
     // Search for Python
-    let results = index.search("machine learning", 10).expect("Search failed");
+    let results = db
+        .search_fts("machine learning", 10)
+        .expect("Search failed");
     assert!(!results.is_empty());
     assert!(results[0].content.contains("Python"));
 
     // Search with limit
-    let results = index.search("programming", 1).expect("Search failed");
+    let results = db.search_fts("programming", 1).expect("Search failed");
     assert_eq!(results.len(), 1);
 }
 
 #[test]
 fn test_search_no_results() {
     let env = TestEnv::new();
+    let db_path = env.index_dir.join("test_empty.db");
 
     let docs = vec![Document::new(
         ChunkKind::Message,
@@ -140,21 +140,18 @@ fn test_search_no_results() {
         PathBuf::from("/test/1.jsonl"),
     )];
 
-    let index = BM25Index::create(&env.index_dir).expect("Failed to create index");
-    let mut writer = index.writer().expect("Failed to create writer");
-    index
-        .add_documents(&mut writer, &docs)
-        .expect("Failed to add documents");
-    writer.commit().expect("Failed to commit");
-    index.reload().expect("Failed to reload reader");
+    let mut db = Database::open(&db_path).expect("Failed to create database");
+    db.insert_documents(&docs)
+        .expect("Failed to insert documents");
 
-    let results = index.search("xyznonexistent", 10).expect("Search failed");
+    let results = db.search_fts("xyznonexistent", 10).expect("Search failed");
     assert!(results.is_empty());
 }
 
 #[test]
-fn test_index_document_count() {
+fn test_database_document_count() {
     let env = TestEnv::new();
+    let db_path = env.index_dir.join("test_count.db");
 
     let docs: Vec<Document> = (0..5)
         .map(|i| {
@@ -166,22 +163,19 @@ fn test_index_document_count() {
         })
         .collect();
 
-    let index = BM25Index::create(&env.index_dir).expect("Failed to create index");
-    let mut writer = index.writer().expect("Failed to create writer");
-    index
-        .add_documents(&mut writer, &docs)
-        .expect("Failed to add documents");
-    writer.commit().expect("Failed to commit");
-    index.reload().expect("Failed to reload reader");
+    let mut db = Database::open(&db_path).expect("Failed to create database");
+    db.insert_documents(&docs)
+        .expect("Failed to insert documents");
 
-    assert_eq!(index.num_docs(), 5);
+    assert_eq!(db.document_count().unwrap(), 5);
 }
 
 #[test]
-fn test_reopen_index() {
+fn test_reopen_database() {
     let env = TestEnv::new();
+    let db_path = env.index_dir.join("test_reopen.db");
 
-    // Create and populate index
+    // Create and populate database
     {
         let docs = vec![Document::new(
             ChunkKind::Message,
@@ -189,25 +183,23 @@ fn test_reopen_index() {
             PathBuf::from("/test/1.jsonl"),
         )];
 
-        let index = BM25Index::create(&env.index_dir).expect("Failed to create index");
-        let mut writer = index.writer().expect("Failed to create writer");
-        index
-            .add_documents(&mut writer, &docs)
-            .expect("Failed to add documents");
-        writer.commit().expect("Failed to commit");
+        let mut db = Database::open(&db_path).expect("Failed to create database");
+        db.insert_documents(&docs)
+            .expect("Failed to insert documents");
     }
 
     // Reopen and verify
-    let index = BM25Index::open(&env.index_dir).expect("Failed to open index");
-    assert_eq!(index.num_docs(), 1);
+    let db = Database::open(&db_path).expect("Failed to open database");
+    assert_eq!(db.document_count().unwrap(), 1);
 
-    let results = index.search("Persistent", 10).expect("Search failed");
+    let results = db.search_fts("Persistent", 10).expect("Search failed");
     assert_eq!(results.len(), 1);
 }
 
 #[test]
 fn test_search_result_metadata() {
     let env = TestEnv::new();
+    let db_path = env.index_dir.join("test_meta.db");
 
     let doc = Document::new(
         ChunkKind::Message,
@@ -218,15 +210,11 @@ fn test_search_result_metadata() {
     .with_session_id(Some("session-xyz".to_string()))
     .with_role(Some("assistant".to_string()));
 
-    let index = BM25Index::create(&env.index_dir).expect("Failed to create index");
-    let mut writer = index.writer().expect("Failed to create writer");
-    index
-        .add_documents(&mut writer, &[doc])
-        .expect("Failed to add documents");
-    writer.commit().expect("Failed to commit");
-    index.reload().expect("Failed to reload reader");
+    let mut db = Database::open(&db_path).expect("Failed to create database");
+    db.insert_documents(&[doc])
+        .expect("Failed to insert documents");
 
-    let results = index.search("metadata", 10).expect("Search failed");
+    let results = db.search_fts("metadata", 10).expect("Search failed");
     assert_eq!(results.len(), 1);
 
     let result = &results[0];
@@ -239,6 +227,7 @@ fn test_search_result_metadata() {
 #[test]
 fn test_tool_use_indexing() {
     let env = TestEnv::new();
+    let db_path = env.index_dir.join("test_tools.db");
 
     let docs = vec![
         Document::new(
@@ -258,22 +247,109 @@ fn test_tool_use_indexing() {
         .with_is_error(Some(false)),
     ];
 
-    let index = BM25Index::create(&env.index_dir).expect("Failed to create index");
-    let mut writer = index.writer().expect("Failed to create writer");
-    index
-        .add_documents(&mut writer, &docs)
-        .expect("Failed to add documents");
-    writer.commit().expect("Failed to commit");
-    index.reload().expect("Failed to reload reader");
+    let mut db = Database::open(&db_path).expect("Failed to create database");
+    db.insert_documents(&docs)
+        .expect("Failed to insert documents");
 
     // Search for git
-    let results = index.search("git", 10).expect("Search failed");
+    let results = db.search_fts("git", 10).expect("Search failed");
     assert!(!results.is_empty());
     assert_eq!(results[0].chunk_kind, "tool_use");
     assert_eq!(results[0].tool_name.as_deref(), Some("Bash"));
 
     // Search for branch
-    let results = index.search("branch main", 10).expect("Search failed");
+    let results = db.search_fts("branch main", 10).expect("Search failed");
     assert!(!results.is_empty());
     assert_eq!(results[0].chunk_kind, "tool_result");
+}
+
+#[test]
+fn test_regex_search() {
+    let env = TestEnv::new();
+    let db_path = env.index_dir.join("test_regex.db");
+
+    let docs = vec![
+        Document::new(
+            ChunkKind::Message,
+            "Error: file not found".to_string(),
+            PathBuf::from("/test/1.jsonl"),
+        ),
+        Document::new(
+            ChunkKind::Message,
+            "Warning: deprecated function".to_string(),
+            PathBuf::from("/test/2.jsonl"),
+        ),
+        Document::new(
+            ChunkKind::Message,
+            "Success: operation completed".to_string(),
+            PathBuf::from("/test/3.jsonl"),
+        ),
+    ];
+
+    let mut db = Database::open(&db_path).expect("Failed to create database");
+    db.insert_documents(&docs)
+        .expect("Failed to insert documents");
+
+    // Regex search for Error or Warning
+    let results = db
+        .search_regex("Error|Warning", 10, false)
+        .expect("Search failed");
+    assert_eq!(results.len(), 2);
+
+    // Case-insensitive regex
+    let results = db.search_regex("error", 10, true).expect("Search failed");
+    assert_eq!(results.len(), 1);
+    assert!(results[0].content.contains("Error"));
+}
+
+#[test]
+fn test_filtered_search() {
+    let env = TestEnv::new();
+    let db_path = env.index_dir.join("test_filter.db");
+
+    let docs = vec![
+        Document::new(
+            ChunkKind::Message,
+            "User asking about git".to_string(),
+            PathBuf::from("/test/1.jsonl"),
+        )
+        .with_role(Some("user".to_string())),
+        Document::new(
+            ChunkKind::ToolUse,
+            "git status".to_string(),
+            PathBuf::from("/test/2.jsonl"),
+        )
+        .with_tool_name(Some("Bash".to_string())),
+        Document::new(
+            ChunkKind::ToolResult,
+            "git output".to_string(),
+            PathBuf::from("/test/3.jsonl"),
+        )
+        .with_tool_name(Some("Bash".to_string()))
+        .with_is_error(Some(true)),
+    ];
+
+    let mut db = Database::open(&db_path).expect("Failed to create database");
+    db.insert_documents(&docs)
+        .expect("Failed to insert documents");
+
+    // Filter by chunk kind (messages only)
+    let results = db
+        .search_fts_filtered("git", 10, Some(ChunkKind::Message), None, false)
+        .expect("Search failed");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].chunk_kind, "message");
+
+    // Filter by tool name
+    let results = db
+        .search_fts_filtered("git", 10, None, Some("Bash"), false)
+        .expect("Search failed");
+    assert_eq!(results.len(), 2);
+
+    // Filter by errors
+    let results = db
+        .search_fts_filtered("git", 10, None, None, true)
+        .expect("Search failed");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].is_error, Some(true));
 }

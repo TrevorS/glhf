@@ -1,12 +1,34 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
-use glhf::commands::SearchOptions;
+use clap::{Parser, Subcommand, ValueEnum};
+use glhf::commands::{SearchMode, SearchOptions};
 
 #[derive(Parser)]
 #[command(name = "glhf", about = "Search your Claude Code history")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Search mode for queries.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum CliSearchMode {
+    /// Hybrid search combining text and semantic (default)
+    #[default]
+    Hybrid,
+    /// Full-text search only (FTS5)
+    Text,
+    /// Semantic/vector search only
+    Semantic,
+}
+
+impl From<CliSearchMode> for SearchMode {
+    fn from(mode: CliSearchMode) -> Self {
+        match mode {
+            CliSearchMode::Hybrid => SearchMode::Hybrid,
+            CliSearchMode::Text => SearchMode::Text,
+            CliSearchMode::Semantic => SearchMode::Semantic,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -16,6 +38,10 @@ enum Commands {
         /// Force a full rebuild of the index
         #[arg(long)]
         rebuild: bool,
+
+        /// Skip embedding generation (text search only)
+        #[arg(long)]
+        skip_embeddings: bool,
     },
 
     /// Search indexed content
@@ -27,8 +53,12 @@ enum Commands {
         #[arg(short, long, default_value = "10")]
         limit: usize,
 
+        /// Search mode: hybrid, text, or semantic
+        #[arg(short, long, default_value = "hybrid")]
+        mode: CliSearchMode,
+
         /// Interpret the query as a regular expression (like grep -e)
-        #[arg(short = 'e', long = "regex")]
+        #[arg(short = 'e', long = "regex", conflicts_with = "mode")]
         regex: bool,
 
         /// Case-insensitive search (like grep -i)
@@ -72,12 +102,16 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Index { rebuild } => {
-            glhf::commands::index(rebuild)?;
+        Commands::Index {
+            rebuild,
+            skip_embeddings,
+        } => {
+            glhf::commands::index(rebuild, skip_embeddings)?;
         }
         Commands::Search {
             query,
             limit,
+            mode,
             regex,
             ignore_case,
             after,
@@ -90,6 +124,7 @@ fn main() -> Result<()> {
         } => {
             let options = SearchOptions {
                 limit,
+                mode: mode.into(),
                 regex,
                 ignore_case,
                 before: context.or(before).unwrap_or(0),

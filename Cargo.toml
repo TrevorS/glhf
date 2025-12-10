@@ -14,14 +14,17 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
+fastembed = "4"
 hex = "0.4"
+regex = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-regex = "1"
-tantivy = "0.25"
+sqlite-vec = "0.1"
 thiserror = "2"
 walkdir = "2"
+zerocopy = { version = "0.8", features = ["derive"] }
 
 [dev-dependencies]
 criterion = { version = "0.8.0", features = ["html_reports"] }

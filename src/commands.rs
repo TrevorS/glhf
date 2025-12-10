@@ -1,15 +1,26 @@
 //! CLI command implementations.
 
 use crate::config;
+use crate::db::{Database, SearchResult};
+use crate::embed::Embedder;
 use crate::error::Error;
-use crate::index::{BM25Index, SearchResult};
 use crate::ingest;
 use crate::models::document::ChunkKind;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
 use std::time::Instant;
+
+/// Search mode for queries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SearchMode {
+    /// Hybrid search combining FTS5 and vector search.
+    #[default]
+    Hybrid,
+    /// Full-text search only (FTS5).
+    Text,
+    /// Semantic/vector search only.
+    Semantic,
+}
 
 /// Options for search command.
 #[allow(clippy::struct_excessive_bools)]
@@ -17,6 +28,8 @@ use std::time::Instant;
 pub struct SearchOptions {
     /// Maximum number of results to return.
     pub limit: usize,
+    /// Search mode (hybrid, text, semantic).
+    pub mode: SearchMode,
     /// Whether to interpret query as a regex pattern.
     pub regex: bool,
     /// Whether to do case-insensitive matching.
@@ -36,12 +49,12 @@ pub struct SearchOptions {
 }
 
 /// Builds or rebuilds the search index from all conversation files.
-pub fn index(_rebuild: bool) -> Result<()> {
-    let index_path = config::bm25_index_dir()?;
+pub fn index(_rebuild: bool, skip_embeddings: bool) -> Result<()> {
+    let db_path = config::database_path()?;
 
-    // Always rebuild until we have proper incremental updates
-    if index_path.exists() {
-        fs::remove_dir_all(&index_path)?;
+    // Always rebuild for now
+    if db_path.exists() {
+        std::fs::remove_file(&db_path)?;
     }
 
     println!("Discovering conversation files...");
@@ -56,42 +69,76 @@ pub fn index(_rebuild: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("Found {doc_count} documents. Building index...");
+    println!("Found {doc_count} documents. Building database...");
 
-    // Create fresh index
-    let idx = BM25Index::create(&index_path)?;
+    // Create database and insert documents
+    let mut db = Database::open(&db_path)?;
+    db.insert_documents(&documents)?;
 
-    // Add documents
-    let mut writer = idx.writer()?;
-    idx.add_documents(&mut writer, &documents)?;
-    writer.commit().context("Failed to commit index")?;
-
-    let elapsed = start.elapsed();
-
+    let db_time = start.elapsed();
     println!(
         "Indexed {} documents in {:.2}s",
         doc_count,
-        elapsed.as_secs_f64()
+        db_time.as_secs_f64()
     );
 
-    // Show index size
-    let size = dir_size(&index_path).unwrap_or(0);
-    println!("Index size: {}", format_size(size));
+    // Generate embeddings unless skipped
+    if !skip_embeddings {
+        println!("\nGenerating embeddings (this may take a while on first run)...");
+        let embed_start = Instant::now();
+
+        let embedder = Embedder::new().context("Failed to initialize embedder")?;
+
+        // Collect document contents
+        let contents: Vec<String> = documents.iter().map(|d| d.content.clone()).collect();
+
+        // Generate embeddings with progress
+        let batch_size = 100;
+        let embeddings =
+            embedder.embed_documents_with_progress(&contents, batch_size, |done, total| {
+                print!("\rEmbedding: {done}/{total} documents");
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+            })?;
+        println!();
+
+        // Insert embeddings
+        let embedding_pairs: Vec<_> = documents
+            .iter()
+            .zip(embeddings.iter())
+            .map(|(d, e)| (d.id.as_str(), e.as_slice()))
+            .collect();
+        db.insert_embeddings(&embedding_pairs)?;
+
+        let embed_time = embed_start.elapsed();
+        println!(
+            "Generated {} embeddings in {:.2}s",
+            embeddings.len(),
+            embed_time.as_secs_f64()
+        );
+    } else {
+        println!("Skipping embeddings (text search only mode).");
+    }
+
+    // Show database size
+    let size = db.file_size().unwrap_or(0);
+    println!("\nDatabase size: {}", format_size(size));
+    println!("Location: {}", db_path.display());
 
     Ok(())
 }
 
-/// Searches the index and prints results to stdout.
+/// Searches the database and prints results to stdout.
 pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
-    let index_path = config::bm25_index_dir()?;
+    let db_path = config::database_path()?;
 
-    if !index_path.exists() {
-        return Err(Error::IndexNotFound { path: index_path }.into());
+    if !db_path.exists() {
+        return Err(Error::DatabaseNotFound { path: db_path }.into());
     }
 
-    let idx = BM25Index::open(&index_path).context("Failed to open index")?;
+    let db = Database::open(&db_path).context("Failed to open database")?;
 
-    // Determine chunk_kind filter (tools_only is post-filtered after search)
+    // Determine chunk_kind filter
     let chunk_kind = options.messages_only.then_some(ChunkKind::Message);
 
     // Check if we need filtering
@@ -99,23 +146,69 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         options.tool.is_some() || options.errors || options.messages_only || options.tools_only;
 
     let mut results = if options.regex {
-        let mut results = idx.search_regex(query, options.limit * 2, options.ignore_case)?;
-        // Post-filter for regex since it doesn't use Tantivy filters
+        // Regex search
+        let mut results = db.search_regex(query, options.limit * 2, options.ignore_case)?;
         if has_filters {
             results.retain(|r| filter_result(r, options));
         }
         results.truncate(options.limit);
         results
-    } else if has_filters {
-        idx.search_filtered(
-            query,
-            options.limit,
-            chunk_kind,
-            options.tool.as_deref(),
-            options.errors,
-        )?
     } else {
-        idx.search(query, options.limit)?
+        // Determine effective search mode
+        let effective_mode = if options.mode == SearchMode::Hybrid
+            || options.mode == SearchMode::Semantic
+        {
+            // Check if we have embeddings
+            if db.has_embeddings()? {
+                options.mode
+            } else {
+                if options.mode == SearchMode::Semantic {
+                    println!("Warning: No embeddings found. Falling back to text search.");
+                    println!(
+                        "Run 'glhf index' without --skip-embeddings to enable semantic search.\n"
+                    );
+                }
+                SearchMode::Text
+            }
+        } else {
+            options.mode
+        };
+
+        match effective_mode {
+            SearchMode::Text => {
+                if has_filters {
+                    db.search_fts_filtered(
+                        query,
+                        options.limit,
+                        chunk_kind,
+                        options.tool.as_deref(),
+                        options.errors,
+                    )?
+                } else {
+                    db.search_fts(query, options.limit)?
+                }
+            }
+            SearchMode::Semantic => {
+                let embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
+                let query_embedding = embedder.embed_query(query)?;
+                let mut results = db.search_vector(&query_embedding, options.limit * 2)?;
+                if has_filters {
+                    results.retain(|r| filter_result(r, options));
+                }
+                results.truncate(options.limit);
+                results
+            }
+            SearchMode::Hybrid => {
+                let embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
+                let query_embedding = embedder.embed_query(query)?;
+                let mut results = db.search_hybrid(query, &query_embedding, options.limit * 2)?;
+                if has_filters {
+                    results.retain(|r| filter_result(r, options));
+                }
+                results.truncate(options.limit);
+                results
+            }
+        }
     };
 
     // Additional filtering for tools_only (exclude messages)
@@ -136,7 +229,7 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         for result in &results {
             if let Some(session_id) = &result.session_id {
                 if !sessions.contains_key(session_id) {
-                    if let Ok(msgs) = idx.get_session_messages(session_id) {
+                    if let Ok(msgs) = db.get_session_messages(session_id) {
                         sessions.insert(session_id.clone(), msgs);
                     }
                 }
@@ -174,7 +267,7 @@ fn print_result_header(num: usize, result: &SearchResult) {
     let label = result.display_label();
 
     println!(
-        "[{}] {} | {} | {} | Score: {:.2}",
+        "[{}] {} | {} | {} | Score: {:.4}",
         num, result.chunk_kind, project_display, label, result.score
     );
 }
@@ -186,14 +279,12 @@ fn print_result_with_context(
     session_messages: &HashMap<String, Vec<SearchResult>>,
 ) {
     let Some(session_id) = &result.session_id else {
-        // No session, just show the match
         let snippet = truncate_content(&result.content, 200);
         println!("    \"{snippet}\"\n");
         return;
     };
 
     let Some(session_msgs) = session_messages.get(session_id) else {
-        // Couldn't find session messages, just show the match
         let snippet = truncate_content(&result.content, 200);
         println!("    \"{snippet}\"\n");
         return;
@@ -203,7 +294,6 @@ fn print_result_with_context(
     let match_pos = session_msgs.iter().position(|m| m.id == result.id);
 
     let Some(pos) = match_pos else {
-        // Couldn't find match in session, just show the match
         let snippet = truncate_content(&result.content, 200);
         println!("    \"{snippet}\"\n");
         return;
@@ -226,25 +316,31 @@ fn print_result_with_context(
     println!();
 }
 
-/// Prints index status information to stdout.
+/// Prints database status information to stdout.
 pub fn status() -> Result<()> {
-    let index_path = config::bm25_index_dir()?;
+    let db_path = config::database_path()?;
 
-    if !index_path.exists() {
-        println!("No index found.");
+    if !db_path.exists() {
+        println!("No database found.");
         println!("Run 'glhf index' to build the search index.");
         return Ok(());
     }
 
-    let idx = BM25Index::open(&index_path).context("Failed to open index")?;
-    let doc_count = idx.num_docs();
-    let size = dir_size(&index_path).unwrap_or(0);
+    let db = Database::open(&db_path).context("Failed to open database")?;
+    let doc_count = db.document_count()?;
+    let embedding_count = db.embedding_count()?;
+    let size = db.file_size().unwrap_or(0);
 
-    println!("Index Status");
-    println!("------------");
-    println!("Documents: {doc_count}");
-    println!("Size: {}", format_size(size));
-    println!("Location: {}", index_path.display());
+    println!("Database Status");
+    println!("---------------");
+    println!("Documents:  {doc_count}");
+    println!("Embeddings: {embedding_count}");
+    println!("Size:       {}", format_size(size));
+    println!("Location:   {}", db_path.display());
+
+    if embedding_count == 0 && doc_count > 0 {
+        println!("\nNote: No embeddings found. Run 'glhf index' to enable semantic search.");
+    }
 
     Ok(())
 }
@@ -275,20 +371,6 @@ fn filter_result(result: &SearchResult, options: &SearchOptions) -> bool {
     }
 
     true
-}
-
-/// Calculate directory size in bytes.
-fn dir_size(path: &Path) -> Result<u64> {
-    let mut size = 0;
-    for entry in walkdir::WalkDir::new(path)
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-    {
-        if entry.file_type().is_file() {
-            size += entry.metadata()?.len();
-        }
-    }
-    Ok(size)
 }
 
 /// Format bytes as human-readable size.

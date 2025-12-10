@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use glhf::index::BM25Index;
+use glhf::db::Database;
 use glhf::models::document::{ChunkKind, Document};
 use std::hint::black_box;
 use std::path::PathBuf;
@@ -116,13 +116,12 @@ fn bench_indexing(c: &mut Criterion) {
                 b.iter_with_setup(
                     || {
                         let temp_dir = TempDir::new().unwrap();
-                        let index = BM25Index::create(temp_dir.path()).unwrap();
-                        (temp_dir, index)
+                        let db_path = temp_dir.path().join("bench.db");
+                        let db = Database::open(&db_path).unwrap();
+                        (temp_dir, db)
                     },
-                    |(_temp_dir, index)| {
-                        let mut writer = index.writer().unwrap();
-                        index.add_documents(&mut writer, black_box(docs)).unwrap();
-                        writer.commit().unwrap();
+                    |(_temp_dir, mut db)| {
+                        db.insert_documents(black_box(docs)).unwrap();
                     },
                 );
             },
@@ -132,13 +131,12 @@ fn bench_indexing(c: &mut Criterion) {
             b.iter_with_setup(
                 || {
                     let temp_dir = TempDir::new().unwrap();
-                    let index = BM25Index::create(temp_dir.path()).unwrap();
-                    (temp_dir, index)
+                    let db_path = temp_dir.path().join("bench.db");
+                    let db = Database::open(&db_path).unwrap();
+                    (temp_dir, db)
                 },
-                |(_temp_dir, index)| {
-                    let mut writer = index.writer().unwrap();
-                    index.add_documents(&mut writer, black_box(docs)).unwrap();
-                    writer.commit().unwrap();
+                |(_temp_dir, mut db)| {
+                    db.insert_documents(black_box(docs)).unwrap();
                 },
             );
         });
@@ -147,13 +145,12 @@ fn bench_indexing(c: &mut Criterion) {
             b.iter_with_setup(
                 || {
                     let temp_dir = TempDir::new().unwrap();
-                    let index = BM25Index::create(temp_dir.path()).unwrap();
-                    (temp_dir, index)
+                    let db_path = temp_dir.path().join("bench.db");
+                    let db = Database::open(&db_path).unwrap();
+                    (temp_dir, db)
                 },
-                |(_temp_dir, index)| {
-                    let mut writer = index.writer().unwrap();
-                    index.add_documents(&mut writer, black_box(docs)).unwrap();
-                    writer.commit().unwrap();
+                |(_temp_dir, mut db)| {
+                    db.insert_documents(black_box(docs)).unwrap();
                 },
             );
         });
@@ -165,27 +162,25 @@ fn bench_indexing(c: &mut Criterion) {
 fn bench_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("search");
 
-    // Setup: create index with mixed docs (messages + tools)
+    // Setup: create database with mixed docs (messages + tools)
     let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("bench.db");
     let docs = generate_mixed_docs(5000);
-    let index = BM25Index::create(temp_dir.path()).unwrap();
-    let mut writer = index.writer().unwrap();
-    index.add_documents(&mut writer, &docs).unwrap();
-    writer.commit().unwrap();
-    index.reload().unwrap();
+    let mut db = Database::open(&db_path).unwrap();
+    db.insert_documents(&docs).unwrap();
 
     let queries = ["Rust", "programming", "cargo", "test"];
 
     for query in queries {
-        group.bench_with_input(BenchmarkId::new("query", query), &query, |b, query| {
-            b.iter(|| index.search(black_box(query), 10).unwrap());
+        group.bench_with_input(BenchmarkId::new("fts_query", query), &query, |b, query| {
+            b.iter(|| db.search_fts(black_box(query), 10).unwrap());
         });
     }
 
     // Bench different result limits
     for limit in [10, 50, 100] {
-        group.bench_with_input(BenchmarkId::new("limit", limit), &limit, |b, limit| {
-            b.iter(|| index.search("programming", black_box(*limit)).unwrap());
+        group.bench_with_input(BenchmarkId::new("fts_limit", limit), &limit, |b, limit| {
+            b.iter(|| db.search_fts("programming", black_box(*limit)).unwrap());
         });
     }
 
@@ -195,57 +190,51 @@ fn bench_search(c: &mut Criterion) {
 fn bench_filtered_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("filtered_search");
 
-    // Setup: create index with mixed docs
+    // Setup: create database with mixed docs
     let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("bench.db");
     let docs = generate_mixed_docs(5000);
-    let index = BM25Index::create(temp_dir.path()).unwrap();
-    let mut writer = index.writer().unwrap();
-    index.add_documents(&mut writer, &docs).unwrap();
-    writer.commit().unwrap();
-    index.reload().unwrap();
+    let mut db = Database::open(&db_path).unwrap();
+    db.insert_documents(&docs).unwrap();
 
     // Filter by chunk kind
     group.bench_function("messages_only", |b| {
         b.iter(|| {
-            index
-                .search_filtered(black_box("test"), 10, Some(ChunkKind::Message), None, false)
+            db.search_fts_filtered(black_box("test"), 10, Some(ChunkKind::Message), None, false)
                 .unwrap()
         });
     });
 
     group.bench_function("tool_use_only", |b| {
         b.iter(|| {
-            index
-                .search_filtered(
-                    black_box("cargo"),
-                    10,
-                    Some(ChunkKind::ToolUse),
-                    None,
-                    false,
-                )
-                .unwrap()
+            db.search_fts_filtered(
+                black_box("cargo"),
+                10,
+                Some(ChunkKind::ToolUse),
+                None,
+                false,
+            )
+            .unwrap()
         });
     });
 
     group.bench_function("tool_result_only", |b| {
         b.iter(|| {
-            index
-                .search_filtered(
-                    black_box("passed"),
-                    10,
-                    Some(ChunkKind::ToolResult),
-                    None,
-                    false,
-                )
-                .unwrap()
+            db.search_fts_filtered(
+                black_box("passed"),
+                10,
+                Some(ChunkKind::ToolResult),
+                None,
+                false,
+            )
+            .unwrap()
         });
     });
 
     // Filter by tool name
     group.bench_function("by_tool_name", |b| {
         b.iter(|| {
-            index
-                .search_filtered(black_box("test"), 10, None, Some("Bash"), false)
+            db.search_fts_filtered(black_box("test"), 10, None, Some("Bash"), false)
                 .unwrap()
         });
     });
@@ -253,18 +242,13 @@ fn bench_filtered_search(c: &mut Criterion) {
     // Regex search
     group.bench_function("regex", |b| {
         b.iter(|| {
-            index
-                .search_regex(black_box("cargo.*test"), 10, false)
+            db.search_regex(black_box("cargo.*test"), 10, false)
                 .unwrap()
         });
     });
 
     group.bench_function("regex_ignore_case", |b| {
-        b.iter(|| {
-            index
-                .search_regex(black_box("CARGO.*TEST"), 10, true)
-                .unwrap()
-        });
+        b.iter(|| db.search_regex(black_box("CARGO.*TEST"), 10, true).unwrap());
     });
 
     group.finish();

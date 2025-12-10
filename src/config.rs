@@ -28,13 +28,13 @@ pub fn index_dir() -> Result<PathBuf> {
         .ok_or(Error::MissingDirectory { dir_type: "cache" })
 }
 
-/// Returns the BM25 index directory (`~/.cache/glhf/bm25`).
+/// Returns the database file path (`~/.cache/glhf/glhf.db`).
 ///
 /// # Errors
 ///
 /// Returns an error if the cache directory cannot be determined.
-pub fn bm25_index_dir() -> Result<PathBuf> {
-    index_dir().map(|p| p.join("bm25"))
+pub fn database_path() -> Result<PathBuf> {
+    index_dir().map(|p| p.join("glhf.db"))
 }
 
 /// Returns the projects directory containing conversation JSONL files (`~/.claude/projects`).
