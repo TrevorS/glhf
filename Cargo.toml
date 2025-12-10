@@ -35,7 +35,8 @@ name = "indexing"
 harness = false
 
 [lints.rust]
-unsafe_code = "forbid"
+# Allow unsafe for sqlite-vec FFI integration (sqlite3_auto_extension)
+unsafe_code = "warn"
 
 [lints.clippy]
 # Correctness

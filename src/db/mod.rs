@@ -5,11 +5,30 @@
 
 use crate::models::document::{ChunkKind, Document};
 use crate::Result;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use std::path::Path;
+use std::sync::Once;
 
 /// Embedding dimension for all-MiniLM-L6-v2 model.
 pub const EMBEDDING_DIM: usize = 384;
+
+/// Ensures sqlite-vec is registered only once per process.
+static SQLITE_VEC_INIT: Once = Once::new();
+
+/// Registers the sqlite-vec extension globally using sqlite3_auto_extension.
+/// This must be called before opening any connections that need vector support.
+fn init_sqlite_vec() {
+    SQLITE_VEC_INIT.call_once(|| {
+        // SAFETY: sqlite3_auto_extension is thread-safe and sqlite3_vec_init
+        // is a valid extension entry point. We use transmute because the function
+        // signatures differ slightly but are compatible.
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+                sqlite_vec::sqlite3_vec_init as *const (),
+            )));
+        }
+    });
+}
 
 /// A search result from the database.
 #[derive(Debug, Clone)]
@@ -56,18 +75,15 @@ pub struct Database {
 impl Database {
     /// Opens or creates a database at the given path.
     pub fn open(path: &Path) -> Result<Self> {
+        // Initialize sqlite-vec extension (once per process)
+        init_sqlite_vec();
+
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         let conn = Connection::open(path)?;
-
-        // Load sqlite-vec extension
-        unsafe {
-            sqlite_vec::sqlite3_vec_init(conn.handle());
-        }
-
         let db = Self { conn };
         db.init_schema()?;
         Ok(db)
@@ -76,12 +92,10 @@ impl Database {
     /// Creates a new in-memory database (for testing).
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
+        // Initialize sqlite-vec extension (once per process)
+        init_sqlite_vec();
+
         let conn = Connection::open_in_memory()?;
-
-        unsafe {
-            sqlite_vec::sqlite3_vec_init(conn.handle());
-        }
-
         let db = Self { conn };
         db.init_schema()?;
         Ok(db)
@@ -596,7 +610,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn make_doc(id: &str, content: &str) -> Document {
+    fn make_doc(_id: &str, content: &str) -> Document {
         Document::new(
             ChunkKind::Message,
             content.to_string(),
