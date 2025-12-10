@@ -1,15 +1,43 @@
 //! CLI command implementations.
 
 use crate::config;
-use crate::index::BM25Index;
+use crate::error::Error;
+use crate::index::{BM25Index, SearchResult};
 use crate::ingest;
+use crate::models::document::ChunkKind;
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 use std::time::Instant;
+
+/// Options for search command.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Default)]
+pub struct SearchOptions {
+    /// Maximum number of results to return.
+    pub limit: usize,
+    /// Whether to interpret query as a regex pattern.
+    pub regex: bool,
+    /// Whether to do case-insensitive matching.
+    pub ignore_case: bool,
+    /// Number of messages to show before each match.
+    pub before: usize,
+    /// Number of messages to show after each match.
+    pub after: usize,
+    /// Filter to a specific tool name (e.g., "Bash", "Read").
+    pub tool: Option<String>,
+    /// Only show error results.
+    pub errors: bool,
+    /// Only show message chunks (exclude tools).
+    pub messages_only: bool,
+    /// Only show tool chunks (exclude messages).
+    pub tools_only: bool,
+}
 
 /// Builds or rebuilds the search index from all conversation files.
 pub fn index(_rebuild: bool) -> Result<()> {
-    let index_path = config::bm25_index_dir();
+    let index_path = config::bm25_index_dir()?;
 
     // Always rebuild until we have proper incremental updates
     if index_path.exists() {
@@ -28,7 +56,7 @@ pub fn index(_rebuild: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("Found {} documents. Building index...", doc_count);
+    println!("Found {doc_count} documents. Building index...");
 
     // Create fresh index
     let idx = BM25Index::create(&index_path)?;
@@ -54,56 +82,153 @@ pub fn index(_rebuild: bool) -> Result<()> {
 }
 
 /// Searches the index and prints results to stdout.
-pub fn search(query: &str, limit: usize) -> Result<()> {
-    let index_path = config::bm25_index_dir();
+pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
+    let index_path = config::bm25_index_dir()?;
 
     if !index_path.exists() {
-        eprintln!("No index found. Run 'glhf index' first.");
-        std::process::exit(1);
+        return Err(Error::IndexNotFound { path: index_path }.into());
     }
 
     let idx = BM25Index::open(&index_path).context("Failed to open index")?;
-    let results = idx.search(query, limit)?;
+
+    // Determine chunk_kind filter (tools_only is post-filtered after search)
+    let chunk_kind = options.messages_only.then_some(ChunkKind::Message);
+
+    // Check if we need filtering
+    let has_filters =
+        options.tool.is_some() || options.errors || options.messages_only || options.tools_only;
+
+    let mut results = if options.regex {
+        let mut results = idx.search_regex(query, options.limit * 2, options.ignore_case)?;
+        // Post-filter for regex since it doesn't use Tantivy filters
+        if has_filters {
+            results.retain(|r| filter_result(r, options));
+        }
+        results.truncate(options.limit);
+        results
+    } else if has_filters {
+        idx.search_filtered(
+            query,
+            options.limit,
+            chunk_kind,
+            options.tool.as_deref(),
+            options.errors,
+        )?
+    } else {
+        idx.search(query, options.limit)?
+    };
+
+    // Additional filtering for tools_only (exclude messages)
+    if options.tools_only {
+        results.retain(|r| r.chunk_kind != "message");
+    }
 
     if results.is_empty() {
-        println!("No matches found for: {}", query);
+        println!("No matches found for: {query}");
         return Ok(());
     }
+
+    let show_context = options.before > 0 || options.after > 0;
+
+    // If we need context, fetch session messages
+    let session_messages: HashMap<String, Vec<SearchResult>> = if show_context {
+        let mut sessions = HashMap::new();
+        for result in &results {
+            if let Some(session_id) = &result.session_id {
+                if !sessions.contains_key(session_id) {
+                    if let Ok(msgs) = idx.get_session_messages(session_id) {
+                        sessions.insert(session_id.clone(), msgs);
+                    }
+                }
+            }
+        }
+        sessions
+    } else {
+        HashMap::new()
+    };
 
     println!("Found {} results:\n", results.len());
 
     for (i, result) in results.iter().enumerate() {
-        let project_display = result
-            .project
-            .as_ref()
-            .map(|p| {
-                // Show just the last path component
-                p.rsplit('/').next().unwrap_or(p)
-            })
-            .unwrap_or("unknown");
+        print_result_header(i + 1, result);
 
-        let role_display = result.role.as_deref().unwrap_or("?");
-
-        println!(
-            "[{}] {} | {} | {} | Score: {:.2}",
-            i + 1,
-            result.doc_type,
-            project_display,
-            role_display,
-            result.score
-        );
-
-        // Show snippet of content
-        let snippet = truncate_content(&result.content, 200);
-        println!("    \"{}\"\n", snippet);
+        if show_context {
+            print_result_with_context(result, options, &session_messages);
+        } else {
+            // Show snippet of content
+            let snippet = truncate_content(&result.content, 200);
+            println!("    \"{snippet}\"\n");
+        }
     }
 
     Ok(())
 }
 
+/// Prints the header for a search result.
+fn print_result_header(num: usize, result: &SearchResult) {
+    let project_display = result.project.as_ref().map_or("unknown", |p| {
+        // Show just the last path component
+        p.rsplit('/').next().unwrap_or(p)
+    });
+
+    let label = result.display_label();
+
+    println!(
+        "[{}] {} | {} | {} | Score: {:.2}",
+        num, result.chunk_kind, project_display, label, result.score
+    );
+}
+
+/// Prints a search result with context messages.
+fn print_result_with_context(
+    result: &SearchResult,
+    options: &SearchOptions,
+    session_messages: &HashMap<String, Vec<SearchResult>>,
+) {
+    let Some(session_id) = &result.session_id else {
+        // No session, just show the match
+        let snippet = truncate_content(&result.content, 200);
+        println!("    \"{snippet}\"\n");
+        return;
+    };
+
+    let Some(session_msgs) = session_messages.get(session_id) else {
+        // Couldn't find session messages, just show the match
+        let snippet = truncate_content(&result.content, 200);
+        println!("    \"{snippet}\"\n");
+        return;
+    };
+
+    // Find the position of this result in the session
+    let match_pos = session_msgs.iter().position(|m| m.id == result.id);
+
+    let Some(pos) = match_pos else {
+        // Couldn't find match in session, just show the match
+        let snippet = truncate_content(&result.content, 200);
+        println!("    \"{snippet}\"\n");
+        return;
+    };
+
+    // Calculate context range
+    let start = pos.saturating_sub(options.before);
+    let end = (pos + 1 + options.after).min(session_msgs.len());
+
+    // Print context messages
+    for (idx, msg) in session_msgs[start..end].iter().enumerate() {
+        let absolute_idx = start + idx;
+        let is_match = absolute_idx == pos;
+        let prefix = if is_match { ">>>" } else { "   " };
+        let label = msg.display_label();
+
+        let snippet = truncate_content(&msg.content, 150);
+        println!("{prefix} [{label}] \"{snippet}\"");
+    }
+    println!();
+}
+
 /// Prints index status information to stdout.
 pub fn status() -> Result<()> {
-    let index_path = config::bm25_index_dir();
+    let index_path = config::bm25_index_dir()?;
 
     if !index_path.exists() {
         println!("No index found.");
@@ -117,19 +242,47 @@ pub fn status() -> Result<()> {
 
     println!("Index Status");
     println!("------------");
-    println!("Documents: {}", doc_count);
+    println!("Documents: {doc_count}");
     println!("Size: {}", format_size(size));
     println!("Location: {}", index_path.display());
 
     Ok(())
 }
 
-/// Calculate directory size in bytes
-fn dir_size(path: &std::path::Path) -> Result<u64> {
+/// Filters a search result based on options.
+fn filter_result(result: &SearchResult, options: &SearchOptions) -> bool {
+    // Filter by messages_only
+    if options.messages_only && result.chunk_kind != "message" {
+        return false;
+    }
+
+    // Filter by tools_only
+    if options.tools_only && result.chunk_kind == "message" {
+        return false;
+    }
+
+    // Filter by tool name
+    if let Some(ref tool) = options.tool {
+        match &result.tool_name {
+            Some(name) if name.eq_ignore_ascii_case(tool) => {}
+            _ => return false,
+        }
+    }
+
+    // Filter by errors
+    if options.errors && result.is_error != Some(true) {
+        return false;
+    }
+
+    true
+}
+
+/// Calculate directory size in bytes.
+fn dir_size(path: &Path) -> Result<u64> {
     let mut size = 0;
     for entry in walkdir::WalkDir::new(path)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
     {
         if entry.file_type().is_file() {
             size += entry.metadata()?.len();
@@ -138,7 +291,7 @@ fn dir_size(path: &std::path::Path) -> Result<u64> {
     Ok(size)
 }
 
-/// Format bytes as human-readable size
+/// Format bytes as human-readable size.
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -151,11 +304,11 @@ fn format_size(bytes: u64) -> String {
     } else if bytes >= KB {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 
-/// Truncate content to max length, breaking at word boundary
+/// Truncate content to max length, breaking at word boundary.
 fn truncate_content(content: &str, max_len: usize) -> String {
     // Normalize whitespace
     let words: Vec<&str> = content.split_whitespace().collect();
@@ -192,6 +345,6 @@ fn truncate_content(content: &str, max_len: usize) -> String {
             normalized.chars().take(max_len).collect::<String>()
         )
     } else {
-        format!("{}...", result)
+        format!("{result}...")
     }
 }
