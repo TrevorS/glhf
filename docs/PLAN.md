@@ -225,6 +225,57 @@ criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
 ```
 
+## Environment Setup
+
+Semantic search requires the ONNX runtime and embedding model. Run the setup script:
+
+```bash
+./scripts/setup-models.sh
+```
+
+Or manually download:
+
+### 1. ONNX Runtime
+Download from [GitHub releases](https://github.com/microsoft/onnxruntime/releases):
+
+```bash
+# Linux x64
+curl -L -o onnxruntime.tgz \
+  "https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-linux-x64-1.20.0.tgz"
+tar -xzf onnxruntime.tgz -C ~/.cache/glhf/
+```
+
+### 2. Embedding Model
+The model downloads automatically on first use, or manually:
+
+```bash
+MODEL_DIR=~/.cache/huggingface/hub/models--Qdrant--all-MiniLM-L6-v2-onnx
+COMMIT=5f1b8cd78bc4fb444dd171e59b18f3a3af89a079
+
+mkdir -p "$MODEL_DIR/snapshots/$COMMIT" "$MODEL_DIR/refs"
+cd "$MODEL_DIR/snapshots/$COMMIT"
+
+HF_BASE="https://huggingface.co/Qdrant/all-MiniLM-L6-v2-onnx/resolve/main"
+curl -L -o model.onnx "$HF_BASE/model.onnx"              # 90MB
+curl -L -o tokenizer.json "$HF_BASE/tokenizer.json"
+curl -L -o config.json "$HF_BASE/config.json"
+curl -L -o special_tokens_map.json "$HF_BASE/special_tokens_map.json"
+curl -L -o tokenizer_config.json "$HF_BASE/tokenizer_config.json"
+
+printf '%s' "$COMMIT" > "$MODEL_DIR/refs/main"
+```
+
+### 3. Environment Variables
+
+Add to your shell profile:
+
+```bash
+export ORT_LIB_LOCATION="$HOME/.cache/glhf/onnxruntime-linux-x64-1.20.0/lib"
+export ORT_STRATEGY=system
+export LD_LIBRARY_PATH="$ORT_LIB_LOCATION:$LD_LIBRARY_PATH"
+export HF_HOME="$HOME/.cache/huggingface/hub"
+```
+
 ## Implementation Order
 
 1. ~~**Scaffold** - Cargo.toml, CLI skeleton, config paths~~ ✅
