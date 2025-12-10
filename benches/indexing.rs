@@ -50,11 +50,15 @@ fn generate_tool_docs(count: usize) -> Vec<Document> {
                     Some(false),
                 ),
             };
-            Document::new(chunk_kind, content, PathBuf::from(format!("/test/{i}.jsonl")))
-                .with_tool_name(Some(tool_name.to_string()))
-                .with_tool_id(Some(format!("tool-{i}")))
-                .with_is_error(is_error)
-                .with_session_id(Some(format!("session-{}", i / 10)))
+            Document::new(
+                chunk_kind,
+                content,
+                PathBuf::from(format!("/test/{i}.jsonl")),
+            )
+            .with_tool_name(Some(tool_name.to_string()))
+            .with_tool_id(Some(format!("tool-{i}")))
+            .with_is_error(is_error)
+            .with_session_id(Some(format!("session-{}", i / 10)))
         })
         .collect()
 }
@@ -212,7 +216,13 @@ fn bench_filtered_search(c: &mut Criterion) {
     group.bench_function("tool_use_only", |b| {
         b.iter(|| {
             index
-                .search_filtered(black_box("cargo"), 10, Some(ChunkKind::ToolUse), None, false)
+                .search_filtered(
+                    black_box("cargo"),
+                    10,
+                    Some(ChunkKind::ToolUse),
+                    None,
+                    false,
+                )
                 .unwrap()
         });
     });
@@ -220,7 +230,13 @@ fn bench_filtered_search(c: &mut Criterion) {
     group.bench_function("tool_result_only", |b| {
         b.iter(|| {
             index
-                .search_filtered(black_box("passed"), 10, Some(ChunkKind::ToolResult), None, false)
+                .search_filtered(
+                    black_box("passed"),
+                    10,
+                    Some(ChunkKind::ToolResult),
+                    None,
+                    false,
+                )
                 .unwrap()
         });
     });
@@ -236,11 +252,19 @@ fn bench_filtered_search(c: &mut Criterion) {
 
     // Regex search
     group.bench_function("regex", |b| {
-        b.iter(|| index.search_regex(black_box("cargo.*test"), 10, false).unwrap());
+        b.iter(|| {
+            index
+                .search_regex(black_box("cargo.*test"), 10, false)
+                .unwrap()
+        });
     });
 
     group.bench_function("regex_ignore_case", |b| {
-        b.iter(|| index.search_regex(black_box("CARGO.*TEST"), 10, true).unwrap());
+        b.iter(|| {
+            index
+                .search_regex(black_box("CARGO.*TEST"), 10, true)
+                .unwrap()
+        });
     });
 
     group.finish();

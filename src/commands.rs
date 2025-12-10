@@ -95,10 +95,8 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
     let chunk_kind = options.messages_only.then_some(ChunkKind::Message);
 
     // Check if we need filtering
-    let has_filters = options.tool.is_some()
-        || options.errors
-        || options.messages_only
-        || options.tools_only;
+    let has_filters =
+        options.tool.is_some() || options.errors || options.messages_only || options.tools_only;
 
     let mut results = if options.regex {
         let mut results = idx.search_regex(query, options.limit * 2, options.ignore_case)?;

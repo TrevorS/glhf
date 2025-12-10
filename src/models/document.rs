@@ -50,7 +50,6 @@ impl ChunkKind {
     }
 }
 
-
 /// A document/chunk to be indexed and searched.
 ///
 /// Documents are created from parsed conversation files and contain
