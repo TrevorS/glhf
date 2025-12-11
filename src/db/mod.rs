@@ -456,6 +456,117 @@ impl Database {
         Ok(fused)
     }
 
+    /// Vector similarity search with filters.
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn search_vector_filtered(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        chunk_kind: Option<ChunkKind>,
+        tool_name: Option<&str>,
+        errors_only: bool,
+    ) -> Result<Vec<SearchResult>> {
+        let embedding_bytes = embedding_to_bytes(query_embedding);
+
+        // Fetch more candidates since sqlite-vec's k limits before we can filter.
+        // Use a high multiplier because messages are a small fraction of all documents.
+        let fetch_k = limit * 50;
+
+        let mut sql = String::from(
+            r"
+            SELECT v.id, v.distance, d.chunk_kind, d.content, d.project, d.session_id,
+                   d.role, d.tool_name, d.tool_id, d.tool_input, d.is_error, d.timestamp
+            FROM documents_vec v
+            JOIN documents d ON d.id = v.id
+            WHERE embedding MATCH ?1 AND k = ?2
+            ",
+        );
+
+        // Build dynamic WHERE clauses
+        let mut param_idx = 3;
+        if chunk_kind.is_some() {
+            let _ = write!(sql, " AND d.chunk_kind = ?{param_idx}");
+            param_idx += 1;
+        }
+        if tool_name.is_some() {
+            let _ = write!(sql, " AND LOWER(d.tool_name) = LOWER(?{param_idx})");
+            param_idx += 1;
+        }
+        if errors_only {
+            let _ = write!(sql, " AND d.is_error = ?{param_idx}");
+        }
+
+        sql.push_str(" ORDER BY v.distance LIMIT ?");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        // Build dynamic parameters
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(embedding_bytes), Box::new(fetch_k as i64)];
+
+        if let Some(ck) = chunk_kind {
+            params_vec.push(Box::new(ck.as_str().to_string()));
+        }
+        if let Some(tn) = tool_name {
+            params_vec.push(Box::new(tn.to_string()));
+        }
+        if errors_only {
+            params_vec.push(Box::new(1_i32));
+        }
+        params_vec.push(Box::new(limit as i64));
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(AsRef::as_ref).collect();
+
+        let results = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                Ok(SearchResult {
+                    id: row.get(0)?,
+                    score: 1.0 - row.get::<_, f64>(1)?, // Convert distance to similarity
+                    chunk_kind: row.get(2)?,
+                    content: row.get(3)?,
+                    project: row.get(4)?,
+                    session_id: row.get(5)?,
+                    role: row.get(6)?,
+                    tool_name: row.get(7)?,
+                    tool_id: row.get(8)?,
+                    tool_input: row.get(9)?,
+                    is_error: row.get(10)?,
+                    timestamp: row.get(11)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(results)
+    }
+
+    /// Hybrid search with filters, combining FTS5 and vector search with RRF fusion.
+    pub fn search_hybrid_filtered(
+        &self,
+        query: &str,
+        query_embedding: &[f32],
+        limit: usize,
+        chunk_kind: Option<ChunkKind>,
+        tool_name: Option<&str>,
+        errors_only: bool,
+    ) -> Result<Vec<SearchResult>> {
+        // Get more results from each method for better fusion
+        let fetch_limit = limit * 3;
+
+        let fts_results =
+            self.search_fts_filtered(query, fetch_limit, chunk_kind, tool_name, errors_only)?;
+        let vec_results = self.search_vector_filtered(
+            query_embedding,
+            fetch_limit,
+            chunk_kind,
+            tool_name,
+            errors_only,
+        )?;
+
+        // RRF fusion
+        let fused = rrf_fusion(&fts_results, &vec_results, limit);
+        Ok(fused)
+    }
+
     /// Finds sessions matching a partial session ID.
     ///
     /// Returns a list of (`session_id`, `doc_count`, project) tuples for sessions

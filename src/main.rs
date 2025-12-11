@@ -74,6 +74,15 @@ enum Commands {
     },
 
     /// Search indexed content
+    #[command(after_help = "\
+EXAMPLES:
+    glhf search 'error' --compact              Quick scan of results
+    glhf search 'auth' --mode semantic         Find conceptually related content
+    glhf search 'git' -t Bash --compact        Find git commands you ran
+    glhf search 'bug' -p myapp --since 1w      Filter by project and time
+    glhf search 'failed' --errors --compact    Find errors only
+    glhf search 'refactor' --messages-only     Human/AI messages only
+")]
     Search {
         /// The search query (or regex pattern with -e)
         query: String,
@@ -150,6 +159,12 @@ enum Commands {
     Projects,
 
     /// View a full conversation session
+    #[command(after_help = "\
+EXAMPLES:
+    glhf session abc123 --summary        Quick overview of a session
+    glhf session abc123 --limit 30       First 30 messages only
+    glhf session abc123 --json           Machine-readable output
+")]
     Session {
         /// Session ID (partial match supported)
         session_id: String,
@@ -168,6 +183,11 @@ enum Commands {
     },
 
     /// Find sessions related to a given session
+    #[command(after_help = "\
+EXAMPLES:
+    glhf related abc123                  Find similar past work
+    glhf related abc123 --limit 10       More related sessions
+")]
     Related {
         /// Session ID to find related sessions for
         session_id: String,

@@ -181,6 +181,9 @@ fn execute_search(
     has_filters: bool,
     resolved_project: Option<&str>,
 ) -> Result<Vec<SearchResult>> {
+    // Determine if we have filters that can be pushed to SQL
+    let has_sql_filters = chunk_kind.is_some() || options.tool.is_some() || options.errors;
+
     let results = match mode {
         SearchMode::Text => {
             if has_filters {
@@ -198,15 +201,38 @@ fn execute_search(
         SearchMode::Semantic | SearchMode::Hybrid => {
             let embedder = Embedder::new().context("Failed to initialize embedder")?;
             let query_embedding = embedder.embed_query(query)?;
-            let mut results = if mode == SearchMode::Semantic {
-                db.search_vector(&query_embedding, options.limit * 2)?
+
+            // Use filtered methods when SQL-pushable filters are active
+            let mut results = if has_sql_filters {
+                if mode == SearchMode::Semantic {
+                    db.search_vector_filtered(
+                        &query_embedding,
+                        options.limit,
+                        chunk_kind,
+                        options.tool.as_deref(),
+                        options.errors,
+                    )?
+                } else {
+                    db.search_hybrid_filtered(
+                        query,
+                        &query_embedding,
+                        options.limit,
+                        chunk_kind,
+                        options.tool.as_deref(),
+                        options.errors,
+                    )?
+                }
+            } else if mode == SearchMode::Semantic {
+                db.search_vector(&query_embedding, options.limit)?
             } else {
-                db.search_hybrid(query, &query_embedding, options.limit * 2)?
+                db.search_hybrid(query, &query_embedding, options.limit)?
             };
-            if has_filters {
+
+            // Still need to filter project and since (not in DB methods)
+            if options.project.is_some() || options.since.is_some() {
                 results.retain(|r| filter_result(r, options, resolved_project));
+                results.truncate(options.limit);
             }
-            results.truncate(options.limit);
             results
         }
     };
@@ -366,9 +392,15 @@ fn print_result_compact(num: usize, result: &SearchResult) {
 
     let label = result.display_label();
     let time_display = format_relative_time(result.timestamp.as_deref());
+    let session_display = result
+        .session_id
+        .as_ref()
+        .map_or("--------", |s| &s[..s.len().min(8)]);
     let snippet = truncate_text(&result.content, 60);
 
-    println!("[{num}] {project_display} | {label} | {time_display} | \"{snippet}\"");
+    println!(
+        "[{num}] {project_display} | {label} | {time_display} | {session_display} | \"{snippet}\""
+    );
 }
 
 /// Formats a timestamp as relative time (e.g., "2h ago", "3 days ago").
