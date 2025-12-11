@@ -1,70 +1,38 @@
 ---
 name: setup-environment
-description: Set up ONNX runtime and embedding model weights for semantic search. Use when the build fails with ONNX errors, model download issues, or environment variable problems.
+description: Set up the embedding model for semantic search. model2vec-rs downloads models automatically; use when build fails or model download issues occur.
 ---
 
 # Environment Setup for Semantic Search
 
 ## Instructions
 
-1. Download ONNX Runtime from GitHub releases
-2. Download embedding model from HuggingFace
-3. Set required environment variables
-4. Verify setup with cargo test
+glhf uses model2vec-rs with Potion-base-32M for embeddings. The model downloads automatically on first use.
 
 ## Quick Setup
 
-Run the automated script:
+No manual setup required:
+
 ```bash
-./scripts/setup-models.sh
+cargo build --release
+./target/release/glhf index
 ```
 
-## Manual Setup
+The embedding model (~130MB) will download to the HuggingFace cache on first run.
 
-### 1. Download ONNX Runtime
+## Model Details
 
-```bash
-ONNX_VERSION="1.20.0"
-PLATFORM="linux-x64"  # or: linux-aarch64, osx-x86_64, osx-arm64
+| Property | Value |
+|----------|-------|
+| Model | minishlab/potion-base-32M |
+| Dimensions | 512 |
+| Size | ~130MB |
+| Cache Location | `~/.cache/huggingface/` |
 
-curl -L -o /tmp/onnxruntime.tgz \
-  "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-${PLATFORM}-${ONNX_VERSION}.tgz"
-
-mkdir -p ~/.cache/glhf
-tar -xzf /tmp/onnxruntime.tgz -C ~/.cache/glhf/
-```
-
-### 2. Download Embedding Model
+## Verify Setup
 
 ```bash
-MODEL_DIR=~/.cache/huggingface/hub/models--Qdrant--all-MiniLM-L6-v2-onnx
-COMMIT=5f1b8cd78bc4fb444dd171e59b18f3a3af89a079
-
-mkdir -p "$MODEL_DIR/snapshots/$COMMIT" "$MODEL_DIR/refs"
-
-HF_BASE="https://huggingface.co/Qdrant/all-MiniLM-L6-v2-onnx/resolve/main"
-curl -L -o "$MODEL_DIR/snapshots/$COMMIT/model.onnx" "$HF_BASE/model.onnx"
-curl -L -o "$MODEL_DIR/snapshots/$COMMIT/tokenizer.json" "$HF_BASE/tokenizer.json"
-curl -L -o "$MODEL_DIR/snapshots/$COMMIT/config.json" "$HF_BASE/config.json"
-curl -L -o "$MODEL_DIR/snapshots/$COMMIT/special_tokens_map.json" "$HF_BASE/special_tokens_map.json"
-curl -L -o "$MODEL_DIR/snapshots/$COMMIT/tokenizer_config.json" "$HF_BASE/tokenizer_config.json"
-
-# IMPORTANT: No trailing newline in refs/main
-printf '%s' "$COMMIT" > "$MODEL_DIR/refs/main"
-```
-
-### 3. Set Environment Variables
-
-```bash
-export ORT_LIB_LOCATION="$HOME/.cache/glhf/onnxruntime-linux-x64-1.20.0/lib"
-export ORT_STRATEGY=system
-export LD_LIBRARY_PATH="$ORT_LIB_LOCATION:$LD_LIBRARY_PATH"
-export HF_HOME="$HOME/.cache/huggingface/hub"
-```
-
-### 4. Verify
-
-```bash
+# Run embedding tests
 cargo test embed -- --ignored
 ```
 
@@ -72,6 +40,16 @@ cargo test embed -- --ignored
 
 | Error | Solution |
 |-------|----------|
-| `failed to load onnxruntime` | Check ORT_LIB_LOCATION points to lib/ directory |
-| `model.onnx not found` | Verify refs/main has no trailing newline |
-| `TLS certificate error` | Use `curl --insecure` in sandboxed environments |
+| `Failed to load model` | Check internet connection, model will auto-download |
+| `No space left` | Clear HuggingFace cache: `rm -rf ~/.cache/huggingface/` |
+| `Slow first run` | Normal - model downloads once, then cached |
+
+## Skip Embeddings
+
+For text-only search (faster indexing, no model download):
+
+```bash
+glhf index --skip-embeddings
+```
+
+This enables FTS5 search but disables semantic/hybrid modes.

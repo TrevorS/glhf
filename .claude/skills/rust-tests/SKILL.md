@@ -12,15 +12,9 @@ description: Run and debug Rust tests for glhf. Use when running tests, fixing t
 cargo test
 ```
 
-### With Environment (for embedding tests)
+### Embedding Tests (require model download)
 ```bash
-export ORT_LIB_LOCATION="$HOME/.cache/glhf/onnxruntime-linux-x64-1.20.0/lib"
-export ORT_STRATEGY=system
-export LD_LIBRARY_PATH="$ORT_LIB_LOCATION:$LD_LIBRARY_PATH"
-export HF_HOME="$HOME/.cache/huggingface/hub"
-
-cargo test
-cargo test embed -- --ignored  # Run embedding tests
+cargo test embed -- --ignored
 ```
 
 ### Specific Tests
@@ -42,7 +36,7 @@ tests/
 src/
 ├── db/mod.rs          # Unit tests in #[cfg(test)] mod tests
 ├── embed.rs           # Embedding tests (#[ignore] for CI)
-└── models/document.rs # Document parsing tests
+└── document.rs        # Document struct tests
 ```
 
 ## Test Utilities
@@ -58,8 +52,9 @@ let jsonl = env.write_jsonl(&project, "file.jsonl", &lines);
 ```rust
 fn user_message(content: &str, session: &str) -> String
 fn assistant_message(content: &str, session: &str) -> String
-fn tool_use_message(tool: &str, input: Value, session: &str) -> String
-fn tool_result_message(content: &str, tool_id: &str, session: &str) -> String
+fn assistant_with_blocks(texts: &[&str], session: &str) -> String
+fn file_history_snapshot() -> String
+fn malformed_json() -> String
 ```
 
 ## Test Categories
@@ -78,7 +73,10 @@ fn tool_result_message(content: &str, tool_id: &str, session: &str) -> String
 ```rust
 #[test]
 fn test_database_operation() {
-    let db = Database::open_in_memory().unwrap();
+    let env = TestEnv::new();
+    let db_path = env.index_dir.join("test.db");
+
+    let mut db = Database::open(&db_path).unwrap();
 
     let doc = Document::new(
         ChunkKind::Message,
@@ -86,7 +84,7 @@ fn test_database_operation() {
         PathBuf::from("/test"),
     );
 
-    db.insert_document(&doc).unwrap();
+    db.insert_documents(&[doc]).unwrap();
 
     let results = db.search_fts("test", 10).unwrap();
     assert_eq!(results.len(), 1);
@@ -96,11 +94,11 @@ fn test_database_operation() {
 ### Embedding Tests (ignored by default)
 ```rust
 #[test]
-#[ignore]  // Requires model files
+#[ignore = "Requires model download"]
 fn test_embedding() {
     let embedder = Embedder::new().unwrap();
     let embedding = embedder.embed_query("test").unwrap();
-    assert_eq!(embedding.len(), 384);
+    assert_eq!(embedding.len(), 512);  // Potion-base-32M dimension
 }
 ```
 
@@ -108,7 +106,6 @@ fn test_embedding() {
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `ONNX not found` | Missing runtime | Run setup-models.sh |
-| `model.onnx not found` | Missing model | Download from HuggingFace |
+| `Failed to load model` | Missing/corrupted model | Delete HF cache, re-run |
 | `sqlite-vec not loaded` | Init order | Call init_sqlite_vec() before open |
 | `FTS5 match failed` | Bad query syntax | Escape special chars |

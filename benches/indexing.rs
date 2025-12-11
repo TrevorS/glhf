@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use glhf::db::Database;
-use glhf::models::document::{ChunkKind, Document};
+use glhf::{ChunkKind, Document};
 use std::hint::black_box;
 use std::path::PathBuf;
 use tempfile::TempDir;

@@ -3,12 +3,12 @@
 ## Goal
 Build a Rust CLI that provides hybrid search (FTS5 + semantic) over all Claude Code history data in `~/.claude`.
 
-## Current Status: v0.3.0
+## Current Status: v0.4.0
 
 ### Implemented
 - [x] CLI with `index`, `search`, `status` commands
 - [x] **SQLite database** with FTS5 full-text search
-- [x] **Semantic search** via sqlite-vec + fastembed
+- [x] **Semantic search** via sqlite-vec + model2vec-rs
 - [x] **Hybrid search** with RRF (Reciprocal Rank Fusion)
 - [x] Conversation JSONL parsing (user/assistant messages)
 - [x] Tool call indexing (ToolUse, ToolResult chunks)
@@ -35,7 +35,7 @@ Build a Rust CLI that provides hybrid search (FTS5 + semantic) over all Claude C
 - **Storage**: Single SQLite database (`~/.cache/glhf/glhf.db`)
 - **Full-text search**: FTS5 (built into SQLite)
 - **Vector search**: sqlite-vec (brute-force, SIMD-optimized)
-- **Embeddings**: fastembed with all-MiniLM-L6-v2 (~22MB model, 384 dimensions)
+- **Embeddings**: model2vec-rs with Potion-base-32M (~130MB model, 512 dimensions)
 - **Hybrid fusion**: Reciprocal Rank Fusion (RRF) with k=60
 - **Indexing**: Full rebuild for now, incremental updates planned
 
@@ -43,7 +43,7 @@ Build a Rust CLI that provides hybrid search (FTS5 + semantic) over all Claude C
 
 | Source | Format | Content | Status |
 |--------|--------|---------|--------|
-| `projects/*.jsonl` | JSONL | Full conversations with tool calls | ✅ Implemented |
+| `projects/*.jsonl` | JSONL | Full conversations with tool calls | Implemented |
 | `history.jsonl` | JSONL | Command log with timestamps | Planned |
 | `todos/*.json` | JSON | Task arrays with status | Planned |
 | `plans/*.md` | Markdown | Implementation plans | Planned |
@@ -51,7 +51,7 @@ Build a Rust CLI that provides hybrid search (FTS5 + semantic) over all Claude C
 
 ## CLI Interface
 
-### Current (v0.3.0)
+### Current (v0.4.0)
 ```
 glhf index [--rebuild] [--skip-embeddings]
   --rebuild              Force full rebuild
@@ -101,8 +101,8 @@ glhf search <QUERY>
 │  │           RRF Fusion                ││
 │  └─────────────────────────────────────┘│
 │  ┌─────────────────────────────────────┐│
-│  │    Embedder (fastembed)             ││
-│  │    all-MiniLM-L6-v2 (384 dims)      ││
+│  │    Embedder (model2vec-rs)          ││
+│  │    Potion-base-32M (512 dims)       ││
 │  └─────────────────────────────────────┘│
 └─────────────────────────────────────────┘
 ```
@@ -116,14 +116,13 @@ src/
 ├── commands.rs          # Command handlers
 ├── config.rs            # Path configuration
 ├── error.rs             # Custom error types
+├── document.rs          # ChunkKind enum, Document struct
 ├── db/
 │   └── mod.rs           # SQLite + FTS5 + sqlite-vec
-├── embed.rs             # fastembed wrapper
-├── ingest/
-│   ├── mod.rs           # File discovery
-│   └── conversation.rs  # JSONL parsing + tool extraction
-└── models/
-    └── document.rs      # ChunkKind enum, Document struct
+├── embed.rs             # model2vec-rs wrapper
+└── ingest/
+    ├── mod.rs           # File discovery
+    └── conversation.rs  # JSONL parsing + tool extraction
 ```
 
 ### Planned Additions
@@ -165,10 +164,10 @@ CREATE VIRTUAL TABLE documents_fts USING fts5(
     content_rowid='rowid'
 );
 
--- Vector table (384 dimensions for all-MiniLM-L6-v2)
+-- Vector table (512 dimensions for Potion-base-32M)
 CREATE VIRTUAL TABLE documents_vec USING vec0(
     id TEXT PRIMARY KEY,
-    embedding FLOAT[384]
+    embedding FLOAT[512]
 );
 ```
 
@@ -208,7 +207,7 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
-fastembed = "4"
+model2vec-rs = "0.1"
 hex = "0.4"
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -217,6 +216,7 @@ serde_json = "1"
 sha2 = "0.10"
 sqlite-vec = "0.1"
 thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 zerocopy = { version = "0.8", features = ["derive"] }
 
@@ -227,53 +227,12 @@ tempfile = "3"
 
 ## Environment Setup
 
-Semantic search requires the ONNX runtime and embedding model. Run the setup script:
+Semantic search uses model2vec-rs with Potion-base-32M. The model downloads automatically on first use (~130MB to HuggingFace cache).
 
+No manual setup required - just run:
 ```bash
-./scripts/setup-models.sh
-```
-
-Or manually download:
-
-### 1. ONNX Runtime
-Download from [GitHub releases](https://github.com/microsoft/onnxruntime/releases):
-
-```bash
-# Linux x64
-curl -L -o onnxruntime.tgz \
-  "https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-linux-x64-1.20.0.tgz"
-tar -xzf onnxruntime.tgz -C ~/.cache/glhf/
-```
-
-### 2. Embedding Model
-The model downloads automatically on first use, or manually:
-
-```bash
-MODEL_DIR=~/.cache/huggingface/hub/models--Qdrant--all-MiniLM-L6-v2-onnx
-COMMIT=5f1b8cd78bc4fb444dd171e59b18f3a3af89a079
-
-mkdir -p "$MODEL_DIR/snapshots/$COMMIT" "$MODEL_DIR/refs"
-cd "$MODEL_DIR/snapshots/$COMMIT"
-
-HF_BASE="https://huggingface.co/Qdrant/all-MiniLM-L6-v2-onnx/resolve/main"
-curl -L -o model.onnx "$HF_BASE/model.onnx"              # 90MB
-curl -L -o tokenizer.json "$HF_BASE/tokenizer.json"
-curl -L -o config.json "$HF_BASE/config.json"
-curl -L -o special_tokens_map.json "$HF_BASE/special_tokens_map.json"
-curl -L -o tokenizer_config.json "$HF_BASE/tokenizer_config.json"
-
-printf '%s' "$COMMIT" > "$MODEL_DIR/refs/main"
-```
-
-### 3. Environment Variables
-
-Add to your shell profile:
-
-```bash
-export ORT_LIB_LOCATION="$HOME/.cache/glhf/onnxruntime-linux-x64-1.20.0/lib"
-export ORT_STRATEGY=system
-export LD_LIBRARY_PATH="$ORT_LIB_LOCATION:$LD_LIBRARY_PATH"
-export HF_HOME="$HOME/.cache/huggingface/hub"
+cargo build --release
+./target/release/glhf index
 ```
 
 ## Implementation Order
@@ -284,7 +243,7 @@ export HF_HOME="$HOME/.cache/huggingface/hub"
 4. ~~**Tool Calls** - Index ToolUse/ToolResult chunks~~ ✅
 5. ~~**Search Options** - Regex, context, filtering~~ ✅
 6. ~~**SQLite Migration** - Replace Tantivy with SQLite + FTS5~~ ✅
-7. ~~**Embeddings** - fastembed integration~~ ✅
+7. ~~**Embeddings** - fastembed integration~~ ✅ (replaced with model2vec-rs)
 8. ~~**Vector Index** - sqlite-vec~~ ✅
 9. ~~**Hybrid** - RRF fusion, mode switching~~ ✅
 10. **More Sources** - todos, plans, history, debug
@@ -295,8 +254,8 @@ export HF_HOME="$HOME/.cache/huggingface/hub"
 
 - Using Rust edition 2021
 - SQLite database is ~2-5MB for ~14K documents + embeddings
-- Embedding generation: ~10-20 docs/sec on CPU
+- Embedding generation: very fast with model2vec-rs (~2K docs/sec)
 - FTS5 search: <1ms for typical queries
 - Vector search: ~10-50ms for 10K+ documents (brute-force)
 - Hybrid search combines both for best relevance
-- Model download (~22MB) happens on first run
+- Model download (~130MB) happens on first run

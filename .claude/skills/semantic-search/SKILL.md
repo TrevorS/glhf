@@ -1,6 +1,6 @@
 ---
 name: semantic-search
-description: Implement and debug semantic/vector search with fastembed and sqlite-vec. Use for embedding generation, vector queries, hybrid search, or RRF fusion.
+description: Implement and debug semantic/vector search with model2vec-rs and sqlite-vec. Use for embedding generation, vector queries, hybrid search, or RRF fusion.
 ---
 
 # Semantic Search Implementation
@@ -15,7 +15,7 @@ description: Implement and debug semantic/vector search with fastembed and sqlit
     ┌─────────┴─────────┐
     │                   │
 ┌───▼───┐         ┌─────▼─────┐
-│ FTS5  │         │ fastembed │
+│ FTS5  │         │model2vec  │
 │(text) │         │(embedding)│
 └───┬───┘         └─────┬─────┘
     │                   │
@@ -37,24 +37,27 @@ description: Implement and debug semantic/vector search with fastembed and sqlit
 ### Embedder (src/embed.rs)
 
 ```rust
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use model2vec_rs::model::StaticModel;
+
+const MODEL_ID: &str = "minishlab/potion-base-32M";
 
 pub struct Embedder {
-    model: TextEmbedding,
+    model: StaticModel,
 }
 
 impl Embedder {
     pub fn new() -> Result<Self> {
-        let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::AllMiniLML6V2)
-                .with_show_download_progress(true)
-        )?;
+        let model = StaticModel::from_pretrained(MODEL_ID, None, None, None)?;
         Ok(Self { model })
     }
 
     pub fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
-        let embeddings = self.model.embed(vec![text], None)?;
+        let embeddings = self.model.encode(&[text.to_string()]);
         Ok(embeddings.into_iter().next().unwrap())
+    }
+
+    pub fn dimension(&self) -> usize {
+        512  // Potion-base-32M outputs 512 dimensions
     }
 }
 ```
@@ -68,8 +71,8 @@ let sql = r#"
     FROM documents_vec v
     JOIN documents d ON d.id = v.id
     WHERE v.embedding MATCH ?1
+      AND k = ?2
     ORDER BY v.distance
-    LIMIT ?2
 "#;
 
 // Convert embedding to bytes for sqlite-vec
@@ -112,7 +115,7 @@ fn rrf_fusion(fts: &[Result], vec: &[Result], k: f32, limit: usize) -> Vec<Resul
 
 ### Check embedding dimensions
 ```rust
-assert_eq!(embedding.len(), 384); // all-MiniLM-L6-v2
+assert_eq!(embedding.len(), 512); // Potion-base-32M
 ```
 
 ### Verify sqlite-vec loaded

@@ -37,10 +37,10 @@ CREATE TRIGGER documents_ai AFTER INSERT ON documents BEGIN
     VALUES (NEW.rowid, NEW.content);
 END;
 
--- Vector embeddings (384 dims for all-MiniLM-L6-v2)
+-- Vector embeddings (512 dims for Potion-base-32M)
 CREATE VIRTUAL TABLE documents_vec USING vec0(
     id TEXT PRIMARY KEY,
-    embedding FLOAT[384]
+    embedding FLOAT[512]
 );
 ```
 
@@ -88,8 +88,8 @@ SELECT d.*, v.distance
 FROM documents_vec v
 JOIN documents d ON d.id = v.id
 WHERE v.embedding MATCH ?1
-ORDER BY v.distance
-LIMIT ?2;
+  AND k = ?2
+ORDER BY v.distance;
 ```
 
 ### Filtered Search

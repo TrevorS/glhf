@@ -4,12 +4,12 @@ A CLI tool for searching your Claude Code conversation history.
 
 ## Features
 
-- **BM25 full-text search** over `~/.claude` conversation data
+- **Hybrid search** combining BM25 full-text + semantic search
 - **Tool call indexing** - search Bash commands, file reads, edits, and more
 - **Regex search** with case-insensitive option
 - **Context display** - show messages before/after matches (like grep)
 - **Filtering** - by tool name, errors only, messages only, or tools only
-- Fast indexing with Tantivy
+- Fast SQLite-based indexing with FTS5 and sqlite-vec
 
 ## Installation
 
@@ -20,11 +20,17 @@ cargo install --path .
 ## Usage
 
 ```bash
-# Build the search index
+# Build the search index (embeddings auto-download on first run)
 glhf index
 
-# Search conversations
+# Search conversations (hybrid mode by default)
 glhf search "rust error handling"
+
+# Text-only search (faster, no embeddings)
+glhf search "rust error" --mode text
+
+# Semantic search (meaning-based)
+glhf search "how to handle failures" --mode semantic
 
 # Search with regex
 glhf search -e "cargo (build|test)" -i
@@ -53,6 +59,7 @@ glhf status
 | Option | Description |
 |--------|-------------|
 | `-l, --limit <N>` | Maximum results (default: 10) |
+| `-m, --mode <MODE>` | hybrid, text, or semantic (default: hybrid) |
 | `-e, --regex` | Interpret query as regex |
 | `-i, --ignore-case` | Case-insensitive search |
 | `-A <N>` | Show N messages after each match |
@@ -62,6 +69,14 @@ glhf status
 | `--errors` | Only show error results |
 | `--messages-only` | Only show messages (exclude tool calls) |
 | `--tools-only` | Only show tool calls (exclude messages) |
+
+## Search Modes
+
+| Mode | Description |
+|------|-------------|
+| `hybrid` | Combines FTS5 + vector search with RRF fusion (default) |
+| `text` | BM25 full-text search only (fast, keyword matching) |
+| `semantic` | Vector similarity search (meaning-based) |
 
 ## Data Format
 
@@ -104,6 +119,7 @@ glhf indexes three types of chunks from conversation files:
 | `role` | "user" or "assistant" (for messages) |
 | `tool_name` | Tool name: Bash, Read, Edit, Grep, etc. |
 | `tool_id` | Links tool_use to its tool_result |
+| `tool_input` | Raw JSON input for tool calls |
 | `is_error` | Whether tool result was an error |
 | `project` | Decoded project path |
 | `session_id` | Claude Code session identifier |
@@ -117,12 +133,11 @@ make check    # Format, lint, and test
 make bench    # Run benchmarks
 ```
 
-### Test Coverage
+### Dependencies
 
-- 20 unit tests
-- 10 integration tests
-- 3 doc tests
-- Criterion benchmarks for indexing and search
+- **Embeddings**: model2vec-rs with Potion-base-32M (~130MB, auto-downloads)
+- **Database**: SQLite with FTS5 + sqlite-vec
+- **No external setup required** - just `cargo build`
 
 ## License
 
