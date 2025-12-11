@@ -35,7 +35,7 @@ Build a Rust CLI that provides hybrid search (FTS5 + semantic) over all Claude C
 - **Storage**: Single SQLite database (`~/.cache/glhf/glhf.db`)
 - **Full-text search**: FTS5 (built into SQLite)
 - **Vector search**: sqlite-vec (brute-force, SIMD-optimized)
-- **Embeddings**: model2vec-rs with Potion-base-32M (~130MB model, 512 dimensions)
+- **Embeddings**: model2vec-rs with Potion-multilingual-128M (256 dimensions)
 - **Hybrid fusion**: Reciprocal Rank Fusion (RRF) with k=60
 - **Indexing**: Full rebuild for now, incremental updates planned
 
@@ -102,7 +102,7 @@ glhf search <QUERY>
 │  └─────────────────────────────────────┘│
 │  ┌─────────────────────────────────────┐│
 │  │    Embedder (model2vec-rs)          ││
-│  │    Potion-base-32M (512 dims)       ││
+│  │    Potion-multilingual-128M (256d)  ││
 │  └─────────────────────────────────────┘│
 └─────────────────────────────────────────┘
 ```
@@ -164,10 +164,10 @@ CREATE VIRTUAL TABLE documents_fts USING fts5(
     content_rowid='rowid'
 );
 
--- Vector table (512 dimensions for Potion-base-32M)
+-- Vector table (256 dimensions for Potion-multilingual-128M)
 CREATE VIRTUAL TABLE documents_vec USING vec0(
     id TEXT PRIMARY KEY,
-    embedding FLOAT[512]
+    embedding FLOAT[256]
 );
 ```
 
@@ -227,7 +227,7 @@ tempfile = "3"
 
 ## Environment Setup
 
-Semantic search uses model2vec-rs with Potion-base-32M. The model downloads automatically on first use (~130MB to HuggingFace cache).
+Semantic search uses model2vec-rs with Potion-multilingual-128M. The model downloads automatically on first use.
 
 No manual setup required - just run:
 ```bash

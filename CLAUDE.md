@@ -100,7 +100,7 @@ glhf is a CLI tool for searching Claude Code conversation history using hybrid s
 
 1. **Ingest** (`ingest/`) - Walks `~/.claude/projects/` and parses JSONL conversation files
 2. **Document** (`document.rs`) - Extracts chunks: messages, tool_use, tool_result
-3. **Embed** (`embed.rs`) - Generates 512-dim embeddings via model2vec-rs (Potion-base-32M)
+3. **Embed** (`embed.rs`) - Generates 256-dim embeddings via model2vec-rs (Potion-multilingual-128M)
 4. **Database** (`db/mod.rs`) - Stores in SQLite with FTS5 + sqlite-vec for hybrid search
 5. **Commands** (`commands.rs`) - CLI handlers for index, search, status, projects, session, related
 

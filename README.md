@@ -354,7 +354,7 @@ make bench    # Run benchmarks
 
 ### Dependencies
 
-- **Embeddings**: model2vec-rs with Potion-base-32M (~130MB, auto-downloads)
+- **Embeddings**: model2vec-rs with Potion-multilingual-128M (256 dimensions, auto-downloads)
 - **Database**: SQLite with FTS5 + sqlite-vec
 - **No external setup required** - just `cargo build`
 
