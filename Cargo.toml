@@ -28,6 +28,10 @@ walkdir = "2"
 criterion = { version = "0.8.1", features = ["html_reports"] }
 tempfile = "3"
 
+[[bin]]
+name = "bench_models"
+path = "src/bin/bench_models.rs"
+
 [[bench]]
 name = "indexing"
 harness = false

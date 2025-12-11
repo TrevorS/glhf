@@ -10,8 +10,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Once;
 
-/// Embedding dimension for Potion-base-32M model.
-pub const EMBEDDING_DIM: usize = 512;
+/// Embedding dimension for Potion-multilingual-128M model.
+pub const EMBEDDING_DIM: usize = 256;
 
 /// Ensures sqlite-vec is registered only once per process.
 static SQLITE_VEC_INIT: Once = Once::new();
