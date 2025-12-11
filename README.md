@@ -8,7 +8,9 @@ A CLI tool for searching your Claude Code conversation history.
 - **Tool call indexing** - search Bash commands, file reads, edits, and more
 - **Regex search** with case-insensitive option
 - **Context display** - show messages before/after matches (like grep)
-- **Filtering** - by tool name, errors only, messages only, or tools only
+- **Filtering** - by tool name, project, time range, errors only, messages only, or tools only
+- **JSON output** - machine-readable format for scripting and agents
+- **Session viewer** - view full conversation sessions with `glhf session`
 - Fast SQLite-based indexing with FTS5 and sqlite-vec
 
 ## Installation
@@ -50,8 +52,25 @@ glhf search "help me" --messages-only
 # Only show tool calls
 glhf search "main.rs" --tools-only
 
+# Filter by project
+glhf search "bug" -p myapp
+
+# Filter to current project
+glhf search "error" -p .
+
+# Search recent history
+glhf search "error" --since 1d
+glhf search "refactor" --since 1w
+
+# JSON output (for scripting/agents)
+glhf search "error" --json
+
 # Check index status
 glhf status
+
+# View a full conversation session
+glhf session <SESSION_ID>
+glhf session abc123    # partial ID matching
 ```
 
 ### Search Options
@@ -66,9 +85,12 @@ glhf status
 | `-B <N>` | Show N messages before each match |
 | `-C <N>` | Show N messages before and after |
 | `-t, --tool <NAME>` | Filter by tool (Bash, Read, Edit, Grep, etc.) |
+| `-p, --project <NAME>` | Filter by project (substring match, or `.` for current dir) |
+| `--since <DURATION>` | Filter by time (1h, 2d, 1w, or 2024-12-01) |
 | `--errors` | Only show error results |
 | `--messages-only` | Only show messages (exclude tool calls) |
 | `--tools-only` | Only show tool calls (exclude messages) |
+| `--json` | Output results as JSON |
 
 ## Search Modes
 
@@ -77,6 +99,23 @@ glhf status
 | `hybrid` | Combines FTS5 + vector search with RRF fusion (default) |
 | `text` | BM25 full-text search only (fast, keyword matching) |
 | `semantic` | Vector similarity search (meaning-based) |
+
+## Query Syntax
+
+Text mode (`--mode text`) uses SQLite FTS5 for full-text search. Query syntax:
+
+| Syntax | Example | Description |
+|--------|---------|-------------|
+| Single word | `error` | Match documents containing "error" |
+| Multiple words | `rust error` | Implicit AND - both words required |
+| OR | `rust OR python` | Match either word |
+| Phrase | `"git status"` | Exact phrase match |
+| Prefix | `err*` | Match words starting with "err" |
+| NOT | `rust NOT python` | Exclude documents with "python" |
+
+**Hybrid mode** (default) combines FTS5 results with semantic search using Reciprocal Rank Fusion. This finds both exact keyword matches and semantically similar content.
+
+**Regex mode** (`-e`) bypasses FTS5 entirely and does a full table scan with regex matching.
 
 ## Data Format
 

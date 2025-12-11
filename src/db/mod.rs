@@ -33,7 +33,7 @@ fn init_sqlite_vec() {
 }
 
 /// A search result from the database.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
     pub id: String,
     pub chunk_kind: String,
@@ -454,6 +454,31 @@ impl Database {
         // RRF fusion
         let fused = rrf_fusion(&fts_results, &vec_results, limit);
         Ok(fused)
+    }
+
+    /// Finds sessions matching a partial session ID.
+    ///
+    /// Returns a list of (`session_id`, `doc_count`, project) tuples for sessions
+    /// where the `session_id` contains the given substring.
+    pub fn find_sessions(&self, partial_id: &str) -> Result<Vec<(String, i64, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            r"
+            SELECT session_id, COUNT(*) as doc_count, MAX(project) as project
+            FROM documents
+            WHERE session_id LIKE '%' || ?1 || '%'
+            GROUP BY session_id
+            ORDER BY MAX(timestamp) DESC
+            LIMIT 20
+            ",
+        )?;
+
+        let results = stmt
+            .query_map(params![partial_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(results)
     }
 
     /// Gets all messages for a session (for context display).

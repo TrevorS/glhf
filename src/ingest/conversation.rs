@@ -6,6 +6,7 @@ use crate::ingest::extract_project_from_path;
 use crate::utils::truncate_text;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -20,10 +21,16 @@ use std::path::Path;
 /// - **Message** chunks: User prompts and assistant text responses
 /// - **`ToolUse`** chunks: Tool invocations with name, id, and input
 /// - **`ToolResult`** chunks: Tool outputs with content and error status
+///
+/// Tool results are linked to their corresponding tool uses via `tool_use_id`,
+/// allowing the tool name to be resolved for proper filtering and display.
 pub fn parse_jsonl_file(path: &Path) -> Result<Vec<Document>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut documents = Vec::new();
+
+    // Map tool_use_id -> tool_name for linking results to their invocations
+    let mut tool_id_to_name: HashMap<String, String> = HashMap::new();
 
     let project = extract_project_from_path(path);
 
@@ -70,6 +77,7 @@ pub fn parse_jsonl_file(path: &Path) -> Result<Vec<Document>> {
             timestamp,
             session_id,
             role,
+            &mut tool_id_to_name,
         );
         documents.extend(chunks);
     }
@@ -78,6 +86,9 @@ pub fn parse_jsonl_file(path: &Path) -> Result<Vec<Document>> {
 }
 
 /// Extracts all chunks (Message, `ToolUse`, `ToolResult`) from a message value.
+///
+/// The `tool_id_to_name` map is updated with `tool_use` blocks and consulted
+/// when processing `tool_result` blocks to resolve the tool name.
 fn extract_chunks(
     value: &Value,
     path: &Path,
@@ -85,6 +96,7 @@ fn extract_chunks(
     timestamp: Option<DateTime<Utc>>,
     session_id: Option<String>,
     role: Option<String>,
+    tool_id_to_name: &mut HashMap<String, String>,
 ) -> Vec<Document> {
     let mut documents = Vec::new();
 
@@ -127,19 +139,29 @@ fn extract_chunks(
                     }
 
                     Some("tool_use") => {
-                        // Create a ToolUse chunk
+                        // Create a ToolUse chunk and register tool_id -> name mapping
                         if let Some(doc) =
                             extract_tool_use(block, path, project, timestamp, session_id.clone())
                         {
+                            // Register the mapping for later tool_result resolution
+                            if let (Some(tool_id), Some(tool_name)) = (&doc.tool_id, &doc.tool_name)
+                            {
+                                tool_id_to_name.insert(tool_id.clone(), tool_name.clone());
+                            }
                             documents.push(doc);
                         }
                     }
 
                     Some("tool_result") => {
-                        // Create a ToolResult chunk
-                        if let Some(doc) =
-                            extract_tool_result(block, path, project, timestamp, session_id.clone())
-                        {
+                        // Create a ToolResult chunk, looking up tool name from map
+                        if let Some(doc) = extract_tool_result(
+                            block,
+                            path,
+                            project,
+                            timestamp,
+                            session_id.clone(),
+                            tool_id_to_name,
+                        ) {
                             documents.push(doc);
                         }
                     }
@@ -289,17 +311,27 @@ fn extract_tool_use_content(tool_name: &str, input: Option<&Value>) -> String {
 }
 
 /// Extracts a `ToolResult` document from a `tool_result` block.
+///
+/// Uses the `tool_id_to_name` map to resolve the tool name from the
+/// corresponding `tool_use` block.
 fn extract_tool_result(
     block: &Value,
     path: &Path,
     project: Option<&str>,
     timestamp: Option<DateTime<Utc>>,
     session_id: Option<String>,
+    tool_id_to_name: &HashMap<String, String>,
 ) -> Option<Document> {
     let tool_use_id = block
         .get("tool_use_id")
         .and_then(|v| v.as_str())
         .map(String::from);
+
+    // Look up the tool name from the map
+    let tool_name = tool_use_id
+        .as_ref()
+        .and_then(|id| tool_id_to_name.get(id))
+        .cloned();
 
     let is_error = block.get("is_error").and_then(serde_json::Value::as_bool);
 
@@ -313,6 +345,7 @@ fn extract_tool_result(
         .with_project(project.map(String::from))
         .with_timestamp(timestamp)
         .with_session_id(session_id)
+        .with_tool_name(tool_name)
         .with_tool_id(tool_use_id)
         .with_is_error(is_error);
 
