@@ -1,13 +1,11 @@
 //! Embeddings generation using model2vec.
 //!
 //! This module provides a wrapper around model2vec for generating text embeddings
-//! using the Potion-base-32M model with parallel batch processing.
+//! using the Potion-base-32M model.
 
 use crate::error::Error;
 use crate::Result;
 use model2vec_rs::model::StaticModel;
-use rayon::prelude::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 const MODEL_ID: &str = "minishlab/potion-base-32M";
 
@@ -57,10 +55,9 @@ impl Embedder {
         Ok(self.model.encode(documents))
     }
 
-    /// Embeds documents in batches with parallel processing.
+    /// Embeds documents in batches with progress reporting.
     ///
-    /// Uses thread-local embedders for parallel batch processing.
-    /// The callback is called periodically with progress updates.
+    /// The callback is called after each batch with (completed, total).
     pub fn embed_documents_with_progress<F>(
         &self,
         documents: &[String],
@@ -68,65 +65,32 @@ impl Embedder {
         on_progress: F,
     ) -> Result<Vec<Vec<f32>>>
     where
-        F: Fn(usize, usize) + Sync, // (completed, total)
+        F: Fn(usize, usize),
     {
         if documents.is_empty() {
             return Ok(Vec::new());
         }
 
         let total = documents.len();
-        let completed = AtomicUsize::new(0);
-
-        // Process batches in parallel using thread-local embedders
-        let chunks: Vec<_> = documents.chunks(batch_size).collect();
-
-        let results: Vec<std::result::Result<Vec<Vec<f32>>, Error>> = chunks
-            .par_iter()
-            .map(|chunk| {
-                // Each thread creates its own embedder instance
-                thread_local! {
-                    static LOCAL_MODEL: std::cell::RefCell<Option<StaticModel>> =
-                        const { std::cell::RefCell::new(None) };
-                }
-
-                LOCAL_MODEL.with(|model_cell| {
-                    let mut model_ref = model_cell.borrow_mut();
-                    if model_ref.is_none() {
-                        *model_ref = Some(
-                            StaticModel::from_pretrained(MODEL_ID, None, None, None).map_err(
-                                |e| Error::Embedding {
-                                    message: format!("Failed to create thread-local model: {e}"),
-                                },
-                            )?,
-                        );
-                    }
-
-                    let model = model_ref.as_ref().unwrap();
-                    let chunk_vec: Vec<String> = chunk.to_vec();
-                    let embeddings = model.encode(&chunk_vec);
-
-                    // Update progress
-                    let done = completed.fetch_add(chunk.len(), Ordering::Relaxed) + chunk.len();
-                    on_progress(done, total);
-
-                    Ok(embeddings)
-                })
-            })
-            .collect();
-
-        // Flatten results preserving order
         let mut all_embeddings = Vec::with_capacity(total);
-        for result in results {
-            all_embeddings.extend(result?);
+        let mut completed = 0;
+
+        for chunk in documents.chunks(batch_size) {
+            let chunk_vec: Vec<String> = chunk.to_vec();
+            let embeddings = self.model.encode(&chunk_vec);
+            all_embeddings.extend(embeddings);
+
+            completed += chunk.len();
+            on_progress(completed, total);
         }
 
         Ok(all_embeddings)
     }
 
-    /// Returns the embedding dimension (256 for Potion-base-32M).
+    /// Returns the embedding dimension (512 for Potion-base-32M).
     #[must_use]
     pub const fn dimension(&self) -> usize {
-        256
+        512
     }
 }
 
@@ -139,7 +103,7 @@ mod tests {
     fn test_embed_query() {
         let embedder = Embedder::new_quiet().unwrap();
         let embedding = embedder.embed_query("hello world").unwrap();
-        assert_eq!(embedding.len(), 256);
+        assert_eq!(embedding.len(), 512);
     }
 
     #[test]
@@ -149,8 +113,8 @@ mod tests {
         let docs = vec!["hello world".to_string(), "goodbye world".to_string()];
         let embeddings = embedder.embed_documents(&docs).unwrap();
         assert_eq!(embeddings.len(), 2);
-        assert_eq!(embeddings[0].len(), 256);
-        assert_eq!(embeddings[1].len(), 256);
+        assert_eq!(embeddings[0].len(), 512);
+        assert_eq!(embeddings[1].len(), 512);
     }
 
     #[test]

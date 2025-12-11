@@ -65,11 +65,8 @@ impl ModelChoice {
             | Self::BGESmallENV15
             | Self::BGESmallENV15Q => 384,
             Self::BGEBaseENV15 | Self::BGEBaseENV15Q => 768,
-            Self::PotionBase2M
-            | Self::PotionBase4M
-            | Self::PotionBase8M
-            | Self::PotionBase32M
-            | Self::PotionRetrieval32M => 256,
+            Self::PotionBase2M | Self::PotionBase4M | Self::PotionBase8M => 256,
+            Self::PotionBase32M | Self::PotionRetrieval32M => 512,
         }
     }
 

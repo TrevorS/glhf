@@ -1,7 +1,6 @@
 //! Document types for indexed content.
 
 use chrono::{DateTime, Utc};
-use sha2::{Digest, Sha256};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -285,18 +284,9 @@ impl Document {
     }
 }
 
-/// Generates a deterministic ID from the source path and content.
-fn generate_id(source_path: &Path, content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(source_path.to_string_lossy().as_bytes());
-
-    // Use first ~100 chars of content to avoid hashing huge strings
-    let content_bytes: String = content.chars().take(100).collect();
-    hasher.update(content_bytes.as_bytes());
-
-    let result = hasher.finalize();
-    // Take first 16 hex chars (8 bytes)
-    hex::encode(&result[..8])
+/// Generates a unique ID using UUID v4.
+fn generate_id(_source_path: &Path, _content: &str) -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[cfg(test)]
@@ -304,13 +294,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_generate_id_deterministic() {
+    fn test_generate_id_unique() {
         let path = PathBuf::from("/test/path.jsonl");
         let content = "test content";
         let id1 = generate_id(&path, content);
         let id2 = generate_id(&path, content);
-        assert_eq!(id1, id2);
-        assert_eq!(id1.len(), 16);
+        // IDs should be unique even for identical inputs (UUID v4)
+        assert_ne!(id1, id2);
+        assert_eq!(id1.len(), 36); // UUID format: 8-4-4-4-12
+        assert_eq!(id2.len(), 36);
     }
 
     #[test]

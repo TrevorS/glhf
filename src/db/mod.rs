@@ -10,8 +10,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Once;
 
-/// Embedding dimension for all-MiniLM-L6-v2 model.
-pub const EMBEDDING_DIM: usize = 384;
+/// Embedding dimension for Potion-base-32M model.
+pub const EMBEDDING_DIM: usize = 512;
 
 /// Ensures sqlite-vec is registered only once per process.
 static SQLITE_VEC_INIT: Once = Once::new();
@@ -255,7 +255,7 @@ impl Database {
         let tx = self.conn.transaction()?;
         {
             let mut stmt =
-                tx.prepare("INSERT OR REPLACE INTO documents_vec (id, embedding) VALUES (?1, ?2)")?;
+                tx.prepare("INSERT INTO documents_vec (id, embedding) VALUES (?1, ?2)")?;
 
             for (doc_id, embedding) in embeddings {
                 let embedding_bytes = embedding_to_bytes(embedding);
@@ -411,9 +411,8 @@ impl Database {
                    d.role, d.tool_name, d.tool_id, d.is_error, d.timestamp
             FROM documents_vec v
             JOIN documents d ON d.id = v.id
-            WHERE embedding MATCH ?1
+            WHERE embedding MATCH ?1 AND k = ?2
             ORDER BY distance
-            LIMIT ?2
             ",
         )?;
 
