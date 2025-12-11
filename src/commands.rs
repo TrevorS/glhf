@@ -2,11 +2,10 @@
 
 use crate::config;
 use crate::db::{Database, SearchResult};
+use crate::document::ChunkKind;
 use crate::embed::Embedder;
 use crate::error::Error;
 use crate::ingest;
-use crate::models::document::ChunkKind;
-use crate::rerank::Reranker;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::io::Write;
@@ -22,10 +21,6 @@ pub enum SearchMode {
     Text,
     /// Semantic/vector search only.
     Semantic,
-    /// Adaptive hybrid that routes based on BM25/vector agreement.
-    Adaptive,
-    /// Hybrid search with cross-encoder reranking.
-    Reranked,
 }
 
 /// Options for search command.
@@ -136,14 +131,11 @@ pub fn index(_rebuild: bool, skip_embeddings: bool) -> Result<()> {
 /// Determines the effective search mode, falling back to text if embeddings unavailable.
 fn get_effective_mode(db: &Database, mode: SearchMode) -> Result<SearchMode> {
     match mode {
-        SearchMode::Hybrid | SearchMode::Semantic | SearchMode::Adaptive | SearchMode::Reranked => {
+        SearchMode::Hybrid | SearchMode::Semantic => {
             if db.has_embeddings()? {
                 Ok(mode)
             } else {
-                if mode == SearchMode::Semantic
-                    || mode == SearchMode::Adaptive
-                    || mode == SearchMode::Reranked
-                {
+                if mode == SearchMode::Semantic {
                     println!("Warning: No embeddings found. Falling back to text search.");
                     println!(
                         "Run 'glhf index' without --skip-embeddings to enable semantic search.\n"
@@ -198,52 +190,6 @@ fn execute_search(
             }
             results.truncate(options.limit);
             results
-        }
-        SearchMode::Adaptive => {
-            let embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
-            let query_embedding = embedder.embed_query(query)?;
-            let mut results =
-                db.search_hybrid_adaptive(query, &query_embedding, options.limit * 2)?;
-            if has_filters {
-                results.retain(|r| filter_result(r, options));
-            }
-            results.truncate(options.limit);
-            results
-        }
-        SearchMode::Reranked => {
-            let embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
-            let query_embedding = embedder.embed_query(query)?;
-
-            // Get top-20 candidates from hybrid search (or more if filtering)
-            let candidate_count = if has_filters { 40 } else { 20 };
-            let mut candidates = db.search_hybrid(query, &query_embedding, candidate_count)?;
-            if candidates.is_empty() {
-                return Ok(vec![]);
-            }
-
-            // Apply filters before reranking
-            if has_filters {
-                candidates.retain(|r| filter_result(r, options));
-            }
-            if candidates.is_empty() {
-                return Ok(vec![]);
-            }
-
-            // Rerank with cross-encoder
-            let mut reranker = Reranker::new_quiet().context("Failed to initialize reranker")?;
-            let contents: Vec<&str> = candidates.iter().map(|r| r.content.as_str()).collect();
-            let scored = reranker.rerank(query, &contents)?;
-
-            // Rebuild results in reranked order
-            scored
-                .into_iter()
-                .take(options.limit)
-                .map(|(idx, score)| {
-                    let mut r = candidates[idx].clone();
-                    r.score = f64::from(score);
-                    r
-                })
-                .collect()
         }
     };
     Ok(results)

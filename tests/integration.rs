@@ -3,7 +3,7 @@ mod common;
 use common::*;
 use glhf::db::Database;
 use glhf::ingest::parse_jsonl_file;
-use glhf::models::document::{ChunkKind, Document};
+use glhf::{ChunkKind, Document};
 use std::path::PathBuf;
 
 #[test]
@@ -157,8 +157,8 @@ fn test_database_document_count() {
         .map(|i| {
             Document::new(
                 ChunkKind::Message,
-                format!("Document number {}", i),
-                PathBuf::from(format!("/test/{}.jsonl", i)),
+                format!("Document number {i}"),
+                PathBuf::from(format!("/test/{i}.jsonl")),
             )
         })
         .collect();

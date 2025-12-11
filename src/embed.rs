@@ -99,7 +99,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore] // Requires model download
+    #[ignore = "Requires model download"]
     fn test_embed_query() {
         let embedder = Embedder::new_quiet().unwrap();
         let embedding = embedder.embed_query("hello world").unwrap();
@@ -107,7 +107,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires model download
+    #[ignore = "Requires model download"]
     fn test_embed_documents() {
         let embedder = Embedder::new_quiet().unwrap();
         let docs = vec!["hello world".to_string(), "goodbye world".to_string()];
@@ -118,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires model download
+    #[ignore = "Requires model download"]
     fn test_embed_empty() {
         let embedder = Embedder::new_quiet().unwrap();
         let embeddings = embedder.embed_documents(&[]).unwrap();

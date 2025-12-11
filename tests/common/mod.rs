@@ -1,10 +1,10 @@
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 /// Test environment with temporary directories for claude data and index
-#[allow(dead_code)]
+#[allow(dead_code, clippy::struct_field_names)]
 pub struct TestEnv {
     pub temp_dir: TempDir, // Must keep alive for cleanup
     pub claude_dir: PathBuf,
@@ -41,11 +41,12 @@ impl TestEnv {
     }
 
     /// Writes a JSONL file with the given content lines
-    pub fn write_jsonl(&self, project_dir: &PathBuf, filename: &str, lines: &[&str]) -> PathBuf {
+    #[allow(clippy::unused_self)]
+    pub fn write_jsonl(&self, project_dir: &Path, filename: &str, lines: &[&str]) -> PathBuf {
         let file_path = project_dir.join(filename);
         let mut file = File::create(&file_path).expect("Failed to create JSONL file");
         for line in lines {
-            writeln!(file, "{}", line).expect("Failed to write line");
+            writeln!(file, "{line}").expect("Failed to write line");
         }
         file_path
     }
@@ -54,16 +55,14 @@ impl TestEnv {
 /// Generates a user message JSON line
 pub fn user_message(content: &str, session_id: &str) -> String {
     format!(
-        r#"{{"type":"user","timestamp":"2025-01-15T10:00:00Z","sessionId":"{}","message":{{"role":"user","content":"{}"}}}}"#,
-        session_id, content
+        r#"{{"type":"user","timestamp":"2025-01-15T10:00:00Z","sessionId":"{session_id}","message":{{"role":"user","content":"{content}"}}}}"#
     )
 }
 
 /// Generates an assistant message JSON line
 pub fn assistant_message(content: &str, session_id: &str) -> String {
     format!(
-        r#"{{"type":"assistant","timestamp":"2025-01-15T10:00:01Z","sessionId":"{}","message":{{"role":"assistant","content":"{}"}}}}"#,
-        session_id, content
+        r#"{{"type":"assistant","timestamp":"2025-01-15T10:00:01Z","sessionId":"{session_id}","message":{{"role":"assistant","content":"{content}"}}}}"#
     )
 }
 
@@ -71,11 +70,10 @@ pub fn assistant_message(content: &str, session_id: &str) -> String {
 pub fn assistant_with_blocks(texts: &[&str], session_id: &str) -> String {
     let blocks: Vec<String> = texts
         .iter()
-        .map(|t| format!(r#"{{"type":"text","text":"{}"}}"#, t))
+        .map(|t| format!(r#"{{"type":"text","text":"{t}"}}"#))
         .collect();
     format!(
-        r#"{{"type":"assistant","timestamp":"2025-01-15T10:00:02Z","sessionId":"{}","message":{{"role":"assistant","content":[{}]}}}}"#,
-        session_id,
+        r#"{{"type":"assistant","timestamp":"2025-01-15T10:00:02Z","sessionId":"{session_id}","message":{{"role":"assistant","content":[{}]}}}}"#,
         blocks.join(",")
     )
 }

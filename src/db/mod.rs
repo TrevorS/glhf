@@ -3,7 +3,7 @@
 //! This module provides unified storage for documents, full-text search via FTS5,
 //! and vector similarity search via sqlite-vec.
 
-use crate::models::document::{ChunkKind, Document};
+use crate::document::{ChunkKind, Document};
 use crate::Result;
 use rusqlite::{params, Connection};
 use std::fmt::Write as _;
@@ -43,6 +43,7 @@ pub struct SearchResult {
     pub role: Option<String>,
     pub tool_name: Option<String>,
     pub tool_id: Option<String>,
+    pub tool_input: Option<String>,
     pub is_error: Option<bool>,
     pub timestamp: Option<String>,
     pub score: f64,
@@ -290,7 +291,7 @@ impl Database {
         let mut stmt = self.conn.prepare(
             r"
             SELECT d.id, d.chunk_kind, d.content, d.project, d.session_id,
-                   d.role, d.tool_name, d.tool_id, d.is_error, d.timestamp,
+                   d.role, d.tool_name, d.tool_id, d.tool_input, d.is_error, d.timestamp,
                    bm25(documents_fts) as score
             FROM documents_fts f
             JOIN documents d ON d.rowid = f.rowid
@@ -311,9 +312,10 @@ impl Database {
                     role: row.get(5)?,
                     tool_name: row.get(6)?,
                     tool_id: row.get(7)?,
-                    is_error: row.get(8)?,
-                    timestamp: row.get(9)?,
-                    score: row.get::<_, f64>(10)?.abs(), // BM25 returns negative scores
+                    tool_input: row.get(8)?,
+                    is_error: row.get(9)?,
+                    timestamp: row.get(10)?,
+                    score: row.get::<_, f64>(11)?.abs(), // BM25 returns negative scores
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -334,7 +336,7 @@ impl Database {
         let mut sql = String::from(
             r"
             SELECT d.id, d.chunk_kind, d.content, d.project, d.session_id,
-                   d.role, d.tool_name, d.tool_id, d.is_error, d.timestamp,
+                   d.role, d.tool_name, d.tool_id, d.tool_input, d.is_error, d.timestamp,
                    bm25(documents_fts) as score
             FROM documents_fts f
             JOIN documents d ON d.rowid = f.rowid
@@ -386,9 +388,10 @@ impl Database {
                     role: row.get(5)?,
                     tool_name: row.get(6)?,
                     tool_id: row.get(7)?,
-                    is_error: row.get(8)?,
-                    timestamp: row.get(9)?,
-                    score: row.get::<_, f64>(10)?.abs(),
+                    tool_input: row.get(8)?,
+                    is_error: row.get(9)?,
+                    timestamp: row.get(10)?,
+                    score: row.get::<_, f64>(11)?.abs(),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -408,7 +411,7 @@ impl Database {
         let mut stmt = self.conn.prepare(
             r"
             SELECT v.id, v.distance, d.chunk_kind, d.content, d.project, d.session_id,
-                   d.role, d.tool_name, d.tool_id, d.is_error, d.timestamp
+                   d.role, d.tool_name, d.tool_id, d.tool_input, d.is_error, d.timestamp
             FROM documents_vec v
             JOIN documents d ON d.id = v.id
             WHERE embedding MATCH ?1 AND k = ?2
@@ -428,8 +431,9 @@ impl Database {
                     role: row.get(6)?,
                     tool_name: row.get(7)?,
                     tool_id: row.get(8)?,
-                    is_error: row.get(9)?,
-                    timestamp: row.get(10)?,
+                    tool_input: row.get(9)?,
+                    is_error: row.get(10)?,
+                    timestamp: row.get(11)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -455,54 +459,12 @@ impl Database {
         Ok(fused)
     }
 
-    /// Adaptive hybrid search - routes based on BM25/vector result agreement.
-    ///
-    /// When BM25 and vector search agree on top results, uses hybrid RRF fusion.
-    /// When they disagree and BM25 has high confidence, trusts BM25 alone.
-    /// This prevents low-quality vector results from diluting good BM25 matches.
-    pub fn search_hybrid_adaptive(
-        &self,
-        query: &str,
-        query_embedding: &[f32],
-        limit: usize,
-    ) -> Result<Vec<SearchResult>> {
-        let fetch_limit = limit * 3;
-
-        // Run both searches
-        let bm25_results = self.search_fts(query, fetch_limit)?;
-        let vector_results = self.search_vector(query_embedding, fetch_limit)?;
-
-        // Check if top results agree
-        let top1_match = !bm25_results.is_empty()
-            && !vector_results.is_empty()
-            && bm25_results[0].id == vector_results[0].id;
-
-        // Check BM25 confidence: high score with clear gap to #2
-        let bm25_confident = bm25_results.len() >= 2
-            && bm25_results[0].score > 10.0
-            && (bm25_results[0].score - bm25_results[1].score) > 3.0;
-
-        // Route decision
-        if top1_match {
-            // Agreement - hybrid fusion is safe
-            let fused = rrf_fusion(&bm25_results, &vector_results, limit);
-            Ok(fused)
-        } else if bm25_confident {
-            // Disagreement + BM25 confident - trust BM25 alone
-            Ok(bm25_results.into_iter().take(limit).collect())
-        } else {
-            // Uncertain - hedge with hybrid fusion
-            let fused = rrf_fusion(&bm25_results, &vector_results, limit);
-            Ok(fused)
-        }
-    }
-
     /// Gets all messages for a session (for context display).
     pub fn get_session_messages(&self, session_id: &str) -> Result<Vec<SearchResult>> {
         let mut stmt = self.conn.prepare(
             r"
             SELECT id, chunk_kind, content, project, session_id,
-                   role, tool_name, tool_id, is_error, timestamp
+                   role, tool_name, tool_id, tool_input, is_error, timestamp
             FROM documents
             WHERE session_id = ?1
             ORDER BY timestamp ASC, rowid ASC
@@ -520,8 +482,9 @@ impl Database {
                     role: row.get(5)?,
                     tool_name: row.get(6)?,
                     tool_id: row.get(7)?,
-                    is_error: row.get(8)?,
-                    timestamp: row.get(9)?,
+                    tool_input: row.get(8)?,
+                    is_error: row.get(9)?,
+                    timestamp: row.get(10)?,
                     score: 0.0,
                 })
             })?
@@ -546,7 +509,7 @@ impl Database {
         let mut stmt = self.conn.prepare(
             r"
             SELECT id, chunk_kind, content, project, session_id,
-                   role, tool_name, tool_id, is_error, timestamp
+                   role, tool_name, tool_id, tool_input, is_error, timestamp
             FROM documents
             ",
         )?;
@@ -566,8 +529,9 @@ impl Database {
                     role: row.get(5)?,
                     tool_name: row.get(6)?,
                     tool_id: row.get(7)?,
-                    is_error: row.get(8)?,
-                    timestamp: row.get(9)?,
+                    tool_input: row.get(8)?,
+                    is_error: row.get(9)?,
+                    timestamp: row.get(10)?,
                     score: 1.0,
                 });
 
@@ -707,6 +671,7 @@ mod tests {
                 role: None,
                 tool_name: None,
                 tool_id: None,
+                tool_input: None,
                 is_error: None,
                 timestamp: None,
             },
@@ -720,6 +685,7 @@ mod tests {
                 role: None,
                 tool_name: None,
                 tool_id: None,
+                tool_input: None,
                 is_error: None,
                 timestamp: None,
             },
@@ -736,6 +702,7 @@ mod tests {
                 role: None,
                 tool_name: None,
                 tool_id: None,
+                tool_input: None,
                 is_error: None,
                 timestamp: None,
             },
@@ -749,6 +716,7 @@ mod tests {
                 role: None,
                 tool_name: None,
                 tool_id: None,
+                tool_input: None,
                 is_error: None,
                 timestamp: None,
             },

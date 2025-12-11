@@ -2,9 +2,9 @@
 
 #![allow(clippy::ref_option)]
 
+use crate::document::{ChunkKind, Document};
 use crate::error::Result;
 use crate::ingest::extract_project_from_path;
-use crate::models::document::{ChunkKind, Document};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::fs::File;
@@ -106,7 +106,6 @@ fn extract_chunks(
         // Array of content blocks
         Value::Array(blocks) => {
             let mut text_parts: Vec<String> = Vec::new();
-            let mut sequence: u32 = 0;
 
             for block in blocks {
                 let block_type = block.get("type").and_then(|v| v.as_str());
@@ -123,31 +122,19 @@ fn extract_chunks(
 
                     Some("tool_use") => {
                         // Create a ToolUse chunk
-                        if let Some(doc) = extract_tool_use(
-                            block,
-                            path,
-                            project,
-                            timestamp,
-                            session_id.clone(),
-                            sequence,
-                        ) {
+                        if let Some(doc) =
+                            extract_tool_use(block, path, project, timestamp, session_id.clone())
+                        {
                             documents.push(doc);
-                            sequence += 1;
                         }
                     }
 
                     Some("tool_result") => {
                         // Create a ToolResult chunk
-                        if let Some(doc) = extract_tool_result(
-                            block,
-                            path,
-                            project,
-                            timestamp,
-                            session_id.clone(),
-                            sequence,
-                        ) {
+                        if let Some(doc) =
+                            extract_tool_result(block, path, project, timestamp, session_id.clone())
+                        {
                             documents.push(doc);
-                            sequence += 1;
                         }
                     }
 
@@ -169,8 +156,7 @@ fn extract_chunks(
                     .with_project(project.clone())
                     .with_timestamp(timestamp)
                     .with_session_id(session_id)
-                    .with_role(role)
-                    .with_sequence(Some(sequence));
+                    .with_role(role);
                 documents.push(doc);
             }
         }
@@ -188,7 +174,6 @@ fn extract_tool_use(
     project: &Option<String>,
     timestamp: Option<DateTime<Utc>>,
     session_id: Option<String>,
-    sequence: u32,
 ) -> Option<Document> {
     let tool_name = block.get("name").and_then(|v| v.as_str())?;
     let tool_id = block.get("id").and_then(|v| v.as_str()).map(String::from);
@@ -205,8 +190,7 @@ fn extract_tool_use(
         .with_session_id(session_id)
         .with_tool_name(Some(tool_name.to_string()))
         .with_tool_id(tool_id)
-        .with_tool_input(tool_input)
-        .with_sequence(Some(sequence));
+        .with_tool_input(tool_input);
 
     Some(doc)
 }
@@ -305,7 +289,6 @@ fn extract_tool_result(
     project: &Option<String>,
     timestamp: Option<DateTime<Utc>>,
     session_id: Option<String>,
-    sequence: u32,
 ) -> Option<Document> {
     let tool_use_id = block
         .get("tool_use_id")
@@ -325,8 +308,7 @@ fn extract_tool_result(
         .with_timestamp(timestamp)
         .with_session_id(session_id)
         .with_tool_id(tool_use_id)
-        .with_is_error(is_error)
-        .with_sequence(Some(sequence));
+        .with_is_error(is_error);
 
     Some(doc)
 }

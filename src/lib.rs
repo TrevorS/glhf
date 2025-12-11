@@ -44,12 +44,10 @@
 pub mod commands;
 pub mod config;
 pub mod db;
+pub mod document;
 pub mod embed;
 pub mod error;
-pub mod eval;
 pub mod ingest;
-pub mod models;
-pub mod rerank;
 
+pub use document::{ChunkKind, Document};
 pub use error::{Error, Result};
-pub use models::document::{ChunkKind, Document};

@@ -57,7 +57,7 @@ impl ChunkKind {
 /// # Example
 ///
 /// ```
-/// use glhf::models::document::{ChunkKind, Document};
+/// use glhf::{ChunkKind, Document};
 /// use std::path::PathBuf;
 ///
 /// // A user message
@@ -110,12 +110,6 @@ pub struct Document {
     /// Whether this tool result was an error.
     pub is_error: Option<bool>,
 
-    // === Hierarchy ===
-    /// The ID of the parent message this chunk belongs to.
-    pub parent_id: Option<String>,
-    /// Sequence number within the parent message (0-indexed).
-    pub sequence: Option<u32>,
-
     // === Searchable Content ===
     /// The primary searchable text content.
     pub content: String,
@@ -141,8 +135,6 @@ impl Document {
             tool_id: None,
             tool_input: None,
             is_error: None,
-            parent_id: None,
-            sequence: None,
             content,
         }
     }
@@ -200,20 +192,6 @@ impl Document {
     #[must_use]
     pub fn with_is_error(mut self, is_error: Option<bool>) -> Self {
         self.is_error = is_error;
-        self
-    }
-
-    /// Sets the parent ID for this document.
-    #[must_use]
-    pub fn with_parent_id(mut self, parent_id: Option<String>) -> Self {
-        self.parent_id = parent_id;
-        self
-    }
-
-    /// Sets the sequence number for this document.
-    #[must_use]
-    pub fn with_sequence(mut self, sequence: Option<u32>) -> Self {
-        self.sequence = sequence;
         self
     }
 
