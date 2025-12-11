@@ -48,6 +48,7 @@ pub mod document;
 pub mod embed;
 pub mod error;
 pub mod ingest;
+pub mod utils;
 
-pub use document::{ChunkKind, Document};
+pub use document::{ChunkKind, DisplayLabel, Document};
 pub use error::{Error, Result};

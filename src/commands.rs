@@ -2,14 +2,24 @@
 
 use crate::config;
 use crate::db::{Database, SearchResult};
-use crate::document::ChunkKind;
+use crate::document::{ChunkKind, DisplayLabel};
 use crate::embed::Embedder;
 use crate::error::Error;
 use crate::ingest;
+use crate::utils::truncate_text;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::io::Write;
 use std::time::Instant;
+
+/// Batch size for embedding generation (optimized for GPU efficiency).
+const EMBEDDING_BATCH_SIZE: usize = 2048;
+
+/// Maximum characters for result snippets.
+const RESULT_SNIPPET_LEN: usize = 200;
+
+/// Maximum characters for context message snippets.
+const CONTEXT_SNIPPET_LEN: usize = 150;
 
 /// Search mode for queries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -95,13 +105,15 @@ pub fn index(_rebuild: bool, skip_embeddings: bool) -> Result<()> {
         // Collect document contents
         let contents: Vec<String> = documents.iter().map(|d| d.content.clone()).collect();
 
-        // Generate embeddings with progress (larger batches for Metal GPU efficiency)
-        let batch_size = 2048;
-        let embeddings =
-            embedder.embed_documents_with_progress(&contents, batch_size, |done, total| {
+        // Generate embeddings with progress
+        let embeddings = embedder.embed_documents_with_progress(
+            &contents,
+            EMBEDDING_BATCH_SIZE,
+            |done, total| {
                 print!("\rEmbedding: {done}/{total} documents");
                 std::io::stdout().flush().ok();
-            })?;
+            },
+        )?;
         println!();
 
         // Insert embeddings
@@ -171,20 +183,14 @@ fn execute_search(
                 db.search_fts(query, options.limit)?
             }
         }
-        SearchMode::Semantic => {
-            let embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
+        SearchMode::Semantic | SearchMode::Hybrid => {
+            let embedder = Embedder::new().context("Failed to initialize embedder")?;
             let query_embedding = embedder.embed_query(query)?;
-            let mut results = db.search_vector(&query_embedding, options.limit * 2)?;
-            if has_filters {
-                results.retain(|r| filter_result(r, options));
-            }
-            results.truncate(options.limit);
-            results
-        }
-        SearchMode::Hybrid => {
-            let embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
-            let query_embedding = embedder.embed_query(query)?;
-            let mut results = db.search_hybrid(query, &query_embedding, options.limit * 2)?;
+            let mut results = if mode == SearchMode::Semantic {
+                db.search_vector(&query_embedding, options.limit * 2)?
+            } else {
+                db.search_hybrid(query, &query_embedding, options.limit * 2)?
+            };
             if has_filters {
                 results.retain(|r| filter_result(r, options));
             }
@@ -223,7 +229,7 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
     let has_filters =
         options.tool.is_some() || options.errors || options.messages_only || options.tools_only;
 
-    let mut results = if options.regex {
+    let results = if options.regex {
         let mut results = db.search_regex(query, options.limit * 2, options.ignore_case)?;
         if has_filters {
             results.retain(|r| filter_result(r, options));
@@ -235,9 +241,6 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         execute_search(&db, query, options, effective_mode, chunk_kind, has_filters)?
     };
 
-    if options.tools_only {
-        results.retain(|r| r.chunk_kind != "message");
-    }
     if results.is_empty() {
         println!("No matches found for: {query}");
         return Ok(());
@@ -256,7 +259,10 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         if show_context {
             print_result_with_context(result, options, &session_messages);
         } else {
-            println!("    \"{}\"\n", truncate_content(&result.content, 200));
+            println!(
+                "    \"{}\"\n",
+                truncate_text(&result.content, RESULT_SNIPPET_LEN)
+            );
         }
     }
     Ok(())
@@ -284,13 +290,13 @@ fn print_result_with_context(
     session_messages: &HashMap<String, Vec<SearchResult>>,
 ) {
     let Some(session_id) = &result.session_id else {
-        let snippet = truncate_content(&result.content, 200);
+        let snippet = truncate_text(&result.content, RESULT_SNIPPET_LEN);
         println!("    \"{snippet}\"\n");
         return;
     };
 
     let Some(session_msgs) = session_messages.get(session_id) else {
-        let snippet = truncate_content(&result.content, 200);
+        let snippet = truncate_text(&result.content, RESULT_SNIPPET_LEN);
         println!("    \"{snippet}\"\n");
         return;
     };
@@ -299,7 +305,7 @@ fn print_result_with_context(
     let match_pos = session_msgs.iter().position(|m| m.id == result.id);
 
     let Some(pos) = match_pos else {
-        let snippet = truncate_content(&result.content, 200);
+        let snippet = truncate_text(&result.content, RESULT_SNIPPET_LEN);
         println!("    \"{snippet}\"\n");
         return;
     };
@@ -315,7 +321,7 @@ fn print_result_with_context(
         let prefix = if is_match { ">>>" } else { "   " };
         let label = msg.display_label();
 
-        let snippet = truncate_content(&msg.content, 150);
+        let snippet = truncate_text(&msg.content, CONTEXT_SNIPPET_LEN);
         println!("{prefix} [{label}] \"{snippet}\"");
     }
     println!();
@@ -392,46 +398,5 @@ fn format_size(bytes: u64) -> String {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
         format!("{bytes} B")
-    }
-}
-
-/// Truncate content to max length, breaking at word boundary.
-fn truncate_content(content: &str, max_len: usize) -> String {
-    // Normalize whitespace
-    let words: Vec<&str> = content.split_whitespace().collect();
-    let normalized = words.join(" ");
-
-    let char_count = normalized.chars().count();
-    if char_count <= max_len {
-        return normalized;
-    }
-
-    // Build up result word by word until we exceed max_len
-    let mut result = String::new();
-    for word in words {
-        let new_len = if result.is_empty() {
-            word.chars().count()
-        } else {
-            result.chars().count() + 1 + word.chars().count()
-        };
-
-        if new_len > max_len {
-            break;
-        }
-
-        if !result.is_empty() {
-            result.push(' ');
-        }
-        result.push_str(word);
-    }
-
-    if result.is_empty() {
-        // Single word too long - just take first max_len chars
-        format!(
-            "{}...",
-            normalized.chars().take(max_len).collect::<String>()
-        )
-    } else {
-        format!("{result}...")
     }
 }

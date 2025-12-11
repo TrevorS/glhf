@@ -1,10 +1,9 @@
 //! Conversation JSONL file parsing.
 
-#![allow(clippy::ref_option)]
-
 use crate::document::{ChunkKind, Document};
 use crate::error::Result;
 use crate::ingest::extract_project_from_path;
+use crate::utils::truncate_text;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::fs::File;
@@ -64,7 +63,14 @@ pub fn parse_jsonl_file(path: &Path) -> Result<Vec<Document>> {
             .map(String::from);
 
         // Extract all chunks from this message
-        let chunks = extract_chunks(&value, path, &project, timestamp, session_id, role);
+        let chunks = extract_chunks(
+            &value,
+            path,
+            project.as_deref(),
+            timestamp,
+            session_id,
+            role,
+        );
         documents.extend(chunks);
     }
 
@@ -75,7 +81,7 @@ pub fn parse_jsonl_file(path: &Path) -> Result<Vec<Document>> {
 fn extract_chunks(
     value: &Value,
     path: &Path,
-    project: &Option<String>,
+    project: Option<&str>,
     timestamp: Option<DateTime<Utc>>,
     session_id: Option<String>,
     role: Option<String>,
@@ -95,7 +101,7 @@ fn extract_chunks(
         Value::String(s) => {
             if !s.trim().is_empty() {
                 let doc = Document::new(ChunkKind::Message, s.clone(), path.to_path_buf())
-                    .with_project(project.clone())
+                    .with_project(project.map(String::from))
                     .with_timestamp(timestamp)
                     .with_session_id(session_id)
                     .with_role(role);
@@ -153,7 +159,7 @@ fn extract_chunks(
             if !text_parts.is_empty() {
                 let combined_text = text_parts.join("\n");
                 let doc = Document::new(ChunkKind::Message, combined_text, path.to_path_buf())
-                    .with_project(project.clone())
+                    .with_project(project.map(String::from))
                     .with_timestamp(timestamp)
                     .with_session_id(session_id)
                     .with_role(role);
@@ -171,7 +177,7 @@ fn extract_chunks(
 fn extract_tool_use(
     block: &Value,
     path: &Path,
-    project: &Option<String>,
+    project: Option<&str>,
     timestamp: Option<DateTime<Utc>>,
     session_id: Option<String>,
 ) -> Option<Document> {
@@ -185,7 +191,7 @@ fn extract_tool_use(
     let content = extract_tool_use_content(tool_name, block.get("input"));
 
     let doc = Document::new(ChunkKind::ToolUse, content, path.to_path_buf())
-        .with_project(project.clone())
+        .with_project(project.map(String::from))
         .with_timestamp(timestamp)
         .with_session_id(session_id)
         .with_tool_name(Some(tool_name.to_string()))
@@ -229,10 +235,10 @@ fn extract_tool_use_content(tool_name: &str, input: Option<&Value>) -> String {
                 parts.push(fp.to_string());
             }
             if let Some(old) = old_str {
-                parts.push(truncate_str(old, 100));
+                parts.push(truncate_text(old, 100));
             }
             if let Some(new) = new_str {
-                parts.push(truncate_str(new, 100));
+                parts.push(truncate_text(new, 100));
             }
 
             if parts.is_empty() {
@@ -258,7 +264,7 @@ fn extract_tool_use_content(tool_name: &str, input: Option<&Value>) -> String {
             input
                 .get("prompt")
                 .and_then(|v| v.as_str())
-                .map_or_else(|| tool_name.to_string(), |s| truncate_str(s, 200))
+                .map_or_else(|| tool_name.to_string(), |s| truncate_text(s, 200))
         }
         "WebFetch" | "WebSearch" => {
             // Extract url or query
@@ -274,7 +280,7 @@ fn extract_tool_use_content(tool_name: &str, input: Option<&Value>) -> String {
             if let Value::Object(obj) = input {
                 obj.values()
                     .find_map(|v| v.as_str())
-                    .map_or_else(|| tool_name.to_string(), |s| truncate_str(s, 200))
+                    .map_or_else(|| tool_name.to_string(), |s| truncate_text(s, 200))
             } else {
                 tool_name.to_string()
             }
@@ -286,7 +292,7 @@ fn extract_tool_use_content(tool_name: &str, input: Option<&Value>) -> String {
 fn extract_tool_result(
     block: &Value,
     path: &Path,
-    project: &Option<String>,
+    project: Option<&str>,
     timestamp: Option<DateTime<Utc>>,
     session_id: Option<String>,
 ) -> Option<Document> {
@@ -304,7 +310,7 @@ fn extract_tool_result(
     }
 
     let doc = Document::new(ChunkKind::ToolResult, content, path.to_path_buf())
-        .with_project(project.clone())
+        .with_project(project.map(String::from))
         .with_timestamp(timestamp)
         .with_session_id(session_id)
         .with_tool_id(tool_use_id)
@@ -321,24 +327,7 @@ fn extract_tool_result_content(block: &Value) -> String {
 
     match content {
         Value::String(s) => s.clone(),
-        Value::Array(arr) => {
-            let texts: Vec<String> = arr
-                .iter()
-                .filter_map(|item| {
-                    // Try text field
-                    item.get("text")
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                        .or_else(|| {
-                            // Try content field for nested structures
-                            item.get("content")
-                                .and_then(|v| v.as_str())
-                                .map(String::from)
-                        })
-                })
-                .collect();
-            texts.join("\n")
-        }
+        Value::Array(arr) => extract_text_strings_from_array(arr, &["text", "content"]),
         _ => String::new(),
     }
 }
@@ -355,12 +344,9 @@ fn extract_text_from_block(block: &Value) -> Option<String> {
         match content {
             Value::String(s) => return Some(s.clone()),
             Value::Array(arr) => {
-                let texts: Vec<String> = arr
-                    .iter()
-                    .filter_map(|item| item.get("text").and_then(|v| v.as_str()).map(String::from))
-                    .collect();
-                if !texts.is_empty() {
-                    return Some(texts.join("\n"));
+                let text = extract_text_strings_from_array(arr, &["text"]);
+                if !text.is_empty() {
+                    return Some(text);
                 }
             }
             _ => {}
@@ -370,19 +356,23 @@ fn extract_text_from_block(block: &Value) -> Option<String> {
     None
 }
 
-/// Truncates a string to approximately `max_chars`, breaking at word boundary.
-fn truncate_str(s: &str, max_chars: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        return s.to_string();
-    }
-
-    let truncated: String = s.chars().take(max_chars).collect();
-    if let Some(last_space) = truncated.rfind([' ', '\n']) {
-        format!("{}...", &truncated[..last_space])
-    } else {
-        format!("{truncated}...")
-    }
+/// Extracts text strings from an array of JSON values by checking specified fields.
+///
+/// Iterates through the array and for each item, tries the field names in order
+/// until it finds a string value. All found strings are joined with newlines.
+fn extract_text_strings_from_array(arr: &[Value], field_names: &[&str]) -> String {
+    let texts: Vec<String> = arr
+        .iter()
+        .filter_map(|item| {
+            for field in field_names {
+                if let Some(text) = item.get(*field).and_then(|v| v.as_str()) {
+                    return Some(text.to_string());
+                }
+            }
+            None
+        })
+        .collect();
+    texts.join("\n")
 }
 
 #[cfg(test)]
@@ -418,14 +408,22 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_str_short() {
-        assert_eq!(truncate_str("hello", 10), "hello");
+    fn test_extract_text_strings_from_array() {
+        let arr: Vec<Value> = vec![
+            serde_json::json!({"text": "hello"}),
+            serde_json::json!({"text": "world"}),
+        ];
+        let result = extract_text_strings_from_array(&arr, &["text"]);
+        assert_eq!(result, "hello\nworld");
     }
 
     #[test]
-    fn test_truncate_str_long() {
-        let result = truncate_str("hello world this is a test", 15);
-        assert!(result.ends_with("..."));
-        assert!(result.len() <= 18); // 15 + "..."
+    fn test_extract_text_strings_from_array_fallback() {
+        let arr: Vec<Value> = vec![
+            serde_json::json!({"content": "fallback"}),
+            serde_json::json!({"text": "primary"}),
+        ];
+        let result = extract_text_strings_from_array(&arr, &["text", "content"]);
+        assert_eq!(result, "fallback\nprimary");
     }
 }

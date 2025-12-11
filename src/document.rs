@@ -4,6 +4,45 @@ use chrono::{DateTime, Utc};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+/// Trait for types that can generate a display label for search results.
+///
+/// This provides a consistent way to display chunk types across different
+/// result types (Document, `SearchResult`, etc.).
+pub trait DisplayLabel {
+    /// Returns the chunk kind as a string slice.
+    fn chunk_kind_str(&self) -> &str;
+
+    /// Returns the role if this is a message chunk.
+    fn role_ref(&self) -> Option<&str>;
+
+    /// Returns the tool name if this is a tool chunk.
+    fn tool_name_ref(&self) -> Option<&str>;
+
+    /// Returns whether this is an error result.
+    fn is_error_flag(&self) -> Option<bool>;
+
+    /// Returns a display label for this chunk.
+    fn display_label(&self) -> String {
+        match self.chunk_kind_str() {
+            "message" => self
+                .role_ref()
+                .map_or_else(|| "message".to_string(), String::from),
+            "tool_use" => {
+                format!("tool:{}", self.tool_name_ref().unwrap_or("unknown"))
+            }
+            "tool_result" => {
+                let tool = self.tool_name_ref().unwrap_or("unknown");
+                if self.is_error_flag() == Some(true) {
+                    format!("result:{tool} (error)")
+                } else {
+                    format!("result:{tool}")
+                }
+            }
+            other => other.to_string(),
+        }
+    }
+}
+
 /// The kind of chunk being indexed.
 ///
 /// This enum is marked `#[non_exhaustive]` to allow adding new chunk types
@@ -241,28 +280,30 @@ impl Document {
             truncated
         }
     }
+}
 
-    /// Returns a display label for this chunk (for search results).
-    #[must_use]
-    pub fn display_label(&self) -> String {
-        match self.chunk_kind {
-            ChunkKind::Message => self.role.clone().unwrap_or_else(|| "message".to_string()),
-            ChunkKind::ToolUse => {
-                format!("tool:{}", self.tool_name.as_deref().unwrap_or("unknown"))
-            }
-            ChunkKind::ToolResult => {
-                let tool = self.tool_name.as_deref().unwrap_or("unknown");
-                if self.is_error == Some(true) {
-                    format!("result:{tool} (error)")
-                } else {
-                    format!("result:{tool}")
-                }
-            }
-        }
+impl DisplayLabel for Document {
+    fn chunk_kind_str(&self) -> &str {
+        self.chunk_kind.as_str()
+    }
+
+    fn role_ref(&self) -> Option<&str> {
+        self.role.as_deref()
+    }
+
+    fn tool_name_ref(&self) -> Option<&str> {
+        self.tool_name.as_deref()
+    }
+
+    fn is_error_flag(&self) -> Option<bool> {
+        self.is_error
     }
 }
 
 /// Generates a unique ID using UUID v4.
+///
+/// Note: The parameters are kept for API compatibility but not used.
+/// Each document gets a unique ID regardless of content.
 fn generate_id(_source_path: &Path, _content: &str) -> String {
     uuid::Uuid::new_v4().to_string()
 }

@@ -28,11 +28,6 @@ impl Embedder {
         Ok(Self { model })
     }
 
-    /// Creates a new embedder (same as new, model2vec doesn't show progress).
-    pub fn new_quiet() -> Result<Self> {
-        Self::new()
-    }
-
     /// Embeds a single query string.
     pub fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
         let embeddings = self.model.encode(&[query.to_string()]);
@@ -86,12 +81,6 @@ impl Embedder {
 
         Ok(all_embeddings)
     }
-
-    /// Returns the embedding dimension (512 for Potion-base-32M).
-    #[must_use]
-    pub const fn dimension(&self) -> usize {
-        512
-    }
 }
 
 #[cfg(test)]
@@ -101,7 +90,7 @@ mod tests {
     #[test]
     #[ignore = "Requires model download"]
     fn test_embed_query() {
-        let embedder = Embedder::new_quiet().unwrap();
+        let embedder = Embedder::new().unwrap();
         let embedding = embedder.embed_query("hello world").unwrap();
         assert_eq!(embedding.len(), 512);
     }
@@ -109,7 +98,7 @@ mod tests {
     #[test]
     #[ignore = "Requires model download"]
     fn test_embed_documents() {
-        let embedder = Embedder::new_quiet().unwrap();
+        let embedder = Embedder::new().unwrap();
         let docs = vec!["hello world".to_string(), "goodbye world".to_string()];
         let embeddings = embedder.embed_documents(&docs).unwrap();
         assert_eq!(embeddings.len(), 2);
@@ -120,7 +109,7 @@ mod tests {
     #[test]
     #[ignore = "Requires model download"]
     fn test_embed_empty() {
-        let embedder = Embedder::new_quiet().unwrap();
+        let embedder = Embedder::new().unwrap();
         let embeddings = embedder.embed_documents(&[]).unwrap();
         assert!(embeddings.is_empty());
     }

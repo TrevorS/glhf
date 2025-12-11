@@ -3,7 +3,7 @@
 //! This module provides unified storage for documents, full-text search via FTS5,
 //! and vector similarity search via sqlite-vec.
 
-use crate::document::{ChunkKind, Document};
+use crate::document::{ChunkKind, DisplayLabel, Document};
 use crate::Result;
 use rusqlite::{params, Connection};
 use std::fmt::Write as _;
@@ -49,24 +49,21 @@ pub struct SearchResult {
     pub score: f64,
 }
 
-impl SearchResult {
-    /// Returns a display label for this result.
-    pub fn display_label(&self) -> String {
-        match self.chunk_kind.as_str() {
-            "message" => self.role.clone().unwrap_or_else(|| "message".to_string()),
-            "tool_use" => {
-                format!("tool:{}", self.tool_name.as_deref().unwrap_or("unknown"))
-            }
-            "tool_result" => {
-                let tool = self.tool_name.as_deref().unwrap_or("unknown");
-                if self.is_error == Some(true) {
-                    format!("result:{tool} (error)")
-                } else {
-                    format!("result:{tool}")
-                }
-            }
-            _ => self.chunk_kind.clone(),
-        }
+impl DisplayLabel for SearchResult {
+    fn chunk_kind_str(&self) -> &str {
+        &self.chunk_kind
+    }
+
+    fn role_ref(&self) -> Option<&str> {
+        self.role.as_deref()
+    }
+
+    fn tool_name_ref(&self) -> Option<&str> {
+        self.tool_name.as_deref()
+    }
+
+    fn is_error_flag(&self) -> Option<bool> {
+        self.is_error
     }
 }
 
