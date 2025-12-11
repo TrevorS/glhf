@@ -180,7 +180,7 @@ fn execute_search(
             }
         }
         SearchMode::Semantic => {
-            let mut embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
+            let embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
             let query_embedding = embedder.embed_query(query)?;
             let mut results = db.search_vector(&query_embedding, options.limit * 2)?;
             if has_filters {
@@ -190,7 +190,7 @@ fn execute_search(
             results
         }
         SearchMode::Hybrid => {
-            let mut embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
+            let embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
             let query_embedding = embedder.embed_query(query)?;
             let mut results = db.search_hybrid(query, &query_embedding, options.limit * 2)?;
             if has_filters {
@@ -200,7 +200,7 @@ fn execute_search(
             results
         }
         SearchMode::Adaptive => {
-            let mut embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
+            let embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
             let query_embedding = embedder.embed_query(query)?;
             let mut results =
                 db.search_hybrid_adaptive(query, &query_embedding, options.limit * 2)?;
@@ -211,7 +211,7 @@ fn execute_search(
             results
         }
         SearchMode::Reranked => {
-            let mut embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
+            let embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
             let query_embedding = embedder.embed_query(query)?;
 
             // Get top-20 candidates from hybrid search (or more if filtering)

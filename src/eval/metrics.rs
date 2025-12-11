@@ -121,7 +121,11 @@ impl EvalMetrics {
         let mean_recall_1 = results.iter().map(|r| r.recall_at_k(1)).sum::<f64>() / n;
         let mean_recall_5 = results.iter().map(|r| r.recall_at_k(5)).sum::<f64>() / n;
         let mean_recall_10 = results.iter().map(|r| r.recall_at_k(10)).sum::<f64>() / n;
-        let mrr = results.iter().map(QueryResult::reciprocal_rank).sum::<f64>() / n;
+        let mrr = results
+            .iter()
+            .map(QueryResult::reciprocal_rank)
+            .sum::<f64>()
+            / n;
         let ndcg_10 = results.iter().map(|r| r.ndcg_at_k(10)).sum::<f64>() / n;
 
         let total_query_time: Duration = results.iter().map(|r| r.embed_time).sum();

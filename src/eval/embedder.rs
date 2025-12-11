@@ -201,11 +201,9 @@ impl EmbedderBackend for FastEmbedBackend {
             return Ok(Vec::new());
         }
 
-        self.model
-            .embed(texts, None)
-            .map_err(|e| Error::Embedding {
-                message: e.to_string(),
-            })
+        self.model.embed(texts, None).map_err(|e| Error::Embedding {
+            message: e.to_string(),
+        })
     }
 }
 

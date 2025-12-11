@@ -1,57 +1,43 @@
-//! Embeddings generation using fastembed.
+//! Embeddings generation using model2vec.
 //!
-//! This module provides a wrapper around fastembed for generating text embeddings
-//! using the all-MiniLM-L6-v2-Q quantized model with parallel batch processing.
+//! This module provides a wrapper around model2vec for generating text embeddings
+//! using the Potion-base-32M model with parallel batch processing.
 
 use crate::error::Error;
 use crate::Result;
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use model2vec_rs::model::StaticModel;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Wrapper around fastembed for generating text embeddings.
+const MODEL_ID: &str = "minishlab/potion-base-32M";
+
+/// Wrapper around model2vec for generating text embeddings.
 pub struct Embedder {
-    model: TextEmbedding,
+    model: StaticModel,
 }
 
 impl Embedder {
-    /// Creates a new embedder with the quantized model (all-MiniLM-L6-v2-Q).
+    /// Creates a new embedder with Potion-base-32M.
     ///
-    /// Uses quantized model for 2-4x faster inference.
-    /// This will download the model on first use (~11MB).
+    /// This will download the model on first use (~130MB).
     pub fn new() -> Result<Self> {
-        // Use quantized model for speed
-        let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::AllMiniLML6V2Q).with_show_download_progress(true),
-        )
-        .map_err(|e| Error::Embedding {
-            message: e.to_string(),
+        let model = StaticModel::from_pretrained(MODEL_ID, None, None, None).map_err(|e| {
+            Error::Embedding {
+                message: format!("Failed to load {MODEL_ID}: {e}"),
+            }
         })?;
 
         Ok(Self { model })
     }
 
-    /// Creates a new embedder without showing download progress.
+    /// Creates a new embedder (same as new, model2vec doesn't show progress).
     pub fn new_quiet() -> Result<Self> {
-        let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::AllMiniLML6V2Q).with_show_download_progress(false),
-        )
-        .map_err(|e| Error::Embedding {
-            message: e.to_string(),
-        })?;
-
-        Ok(Self { model })
+        Self::new()
     }
 
     /// Embeds a single query string.
-    pub fn embed_query(&mut self, query: &str) -> Result<Vec<f32>> {
-        let embeddings = self
-            .model
-            .embed(vec![query], None)
-            .map_err(|e| Error::Embedding {
-                message: e.to_string(),
-            })?;
-
+    pub fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
+        let embeddings = self.model.encode(&[query.to_string()]);
         embeddings
             .into_iter()
             .next()
@@ -63,17 +49,12 @@ impl Embedder {
     /// Embeds multiple documents in a batch.
     ///
     /// Returns embeddings in the same order as the input documents.
-    /// Uses internal batching with default batch size of 256.
-    pub fn embed_documents(&mut self, documents: &[String]) -> Result<Vec<Vec<f32>>> {
+    pub fn embed_documents(&self, documents: &[String]) -> Result<Vec<Vec<f32>>> {
         if documents.is_empty() {
             return Ok(Vec::new());
         }
 
-        self.model
-            .embed(documents, Some(256))
-            .map_err(|e| Error::Embedding {
-                message: e.to_string(),
-            })
+        Ok(self.model.encode(documents))
     }
 
     /// Embeds documents in batches with parallel processing.
@@ -104,7 +85,7 @@ impl Embedder {
             .map(|chunk| {
                 // Each thread creates its own embedder instance
                 thread_local! {
-                    static LOCAL_MODEL: std::cell::RefCell<Option<TextEmbedding>> =
+                    static LOCAL_MODEL: std::cell::RefCell<Option<StaticModel>> =
                         const { std::cell::RefCell::new(None) };
                 }
 
@@ -112,23 +93,17 @@ impl Embedder {
                     let mut model_ref = model_cell.borrow_mut();
                     if model_ref.is_none() {
                         *model_ref = Some(
-                            TextEmbedding::try_new(
-                                InitOptions::new(EmbeddingModel::AllMiniLML6V2Q)
-                                    .with_show_download_progress(false),
-                            )
-                            .map_err(|e| Error::Embedding {
-                                message: format!("Failed to create thread-local model: {e}"),
-                            })?,
+                            StaticModel::from_pretrained(MODEL_ID, None, None, None).map_err(
+                                |e| Error::Embedding {
+                                    message: format!("Failed to create thread-local model: {e}"),
+                                },
+                            )?,
                         );
                     }
 
-                    let model = model_ref.as_mut().unwrap();
-                    let embeddings =
-                        model
-                            .embed(chunk, Some(chunk.len()))
-                            .map_err(|e| Error::Embedding {
-                                message: e.to_string(),
-                            })?;
+                    let model = model_ref.as_ref().unwrap();
+                    let chunk_vec: Vec<String> = chunk.to_vec();
+                    let embeddings = model.encode(&chunk_vec);
 
                     // Update progress
                     let done = completed.fetch_add(chunk.len(), Ordering::Relaxed) + chunk.len();
@@ -148,10 +123,10 @@ impl Embedder {
         Ok(all_embeddings)
     }
 
-    /// Returns the embedding dimension (384 for all-MiniLM-L6-v2).
+    /// Returns the embedding dimension (256 for Potion-base-32M).
     #[must_use]
     pub const fn dimension(&self) -> usize {
-        384
+        256
     }
 }
 
@@ -162,26 +137,26 @@ mod tests {
     #[test]
     #[ignore] // Requires model download
     fn test_embed_query() {
-        let mut embedder = Embedder::new_quiet().unwrap();
+        let embedder = Embedder::new_quiet().unwrap();
         let embedding = embedder.embed_query("hello world").unwrap();
-        assert_eq!(embedding.len(), 384);
+        assert_eq!(embedding.len(), 256);
     }
 
     #[test]
     #[ignore] // Requires model download
     fn test_embed_documents() {
-        let mut embedder = Embedder::new_quiet().unwrap();
+        let embedder = Embedder::new_quiet().unwrap();
         let docs = vec!["hello world".to_string(), "goodbye world".to_string()];
         let embeddings = embedder.embed_documents(&docs).unwrap();
         assert_eq!(embeddings.len(), 2);
-        assert_eq!(embeddings[0].len(), 384);
-        assert_eq!(embeddings[1].len(), 384);
+        assert_eq!(embeddings[0].len(), 256);
+        assert_eq!(embeddings[1].len(), 256);
     }
 
     #[test]
     #[ignore] // Requires model download
     fn test_embed_empty() {
-        let mut embedder = Embedder::new_quiet().unwrap();
+        let embedder = Embedder::new_quiet().unwrap();
         let embeddings = embedder.embed_documents(&[]).unwrap();
         assert!(embeddings.is_empty());
     }
