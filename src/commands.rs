@@ -22,6 +22,60 @@ const RESULT_SNIPPET_LEN: usize = 200;
 /// Maximum characters for context message snippets.
 const CONTEXT_SNIPPET_LEN: usize = 150;
 
+/// Normalizes scores to 0-1 range within the result set.
+///
+/// Uses min-max normalization so the best result has score 1.0 and
+/// the worst has score 0.0. This makes scores comparable within a
+/// single search, though not across different searches.
+fn normalize_scores(results: &mut [SearchResult]) {
+    if results.is_empty() {
+        return;
+    }
+
+    let min = results
+        .iter()
+        .map(|r| r.score)
+        .fold(f64::INFINITY, f64::min);
+    let max = results
+        .iter()
+        .map(|r| r.score)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    if (max - min).abs() < f64::EPSILON {
+        // All same score → all 1.0
+        for r in results.iter_mut() {
+            r.score = 1.0;
+        }
+    } else {
+        for r in results.iter_mut() {
+            r.score = (r.score - min) / (max - min);
+        }
+    }
+}
+
+/// Normalizes scores for ranked sessions (used by `related` command).
+fn normalize_ranked_sessions(sessions: &mut [RankedSession]) {
+    if sessions.is_empty() {
+        return;
+    }
+
+    let min = sessions.iter().map(|s| s.1).fold(f64::INFINITY, f64::min);
+    let max = sessions
+        .iter()
+        .map(|s| s.1)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    if (max - min).abs() < f64::EPSILON {
+        for s in sessions.iter_mut() {
+            s.1 = 1.0;
+        }
+    } else {
+        for s in sessions.iter_mut() {
+            s.1 = (s.1 - min) / (max - min);
+        }
+    }
+}
+
 /// Search mode for queries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SearchMode {
@@ -68,6 +122,8 @@ pub struct SearchOptions {
     pub show_session_id: bool,
     /// Only show results since this timestamp.
     pub since: Option<DateTime<Utc>>,
+    /// Show relevance scores in output.
+    pub show_scores: bool,
 }
 
 /// Builds or rebuilds the search index from all conversation files.
@@ -288,7 +344,7 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         || options.tools_only
         || options.since.is_some();
 
-    let results = if options.regex {
+    let mut results = if options.regex {
         let mut results = db.search_regex(query, options.limit * 2, options.ignore_case)?;
         if has_filters {
             results.retain(|r| filter_result(r, options, resolved_project.as_deref()));
@@ -307,6 +363,9 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
             resolved_project.as_deref(),
         )?
     };
+
+    // Normalize scores to 0-1 range for consistent display
+    normalize_scores(&mut results);
 
     // JSON output mode
     if options.json {
@@ -334,9 +393,9 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
     println!("Found {} results:\n", results.len());
     for (i, result) in results.iter().enumerate() {
         if options.compact {
-            print_result_compact(i + 1, result);
+            print_result_compact(i + 1, result, options.show_scores);
         } else {
-            print_result_header(i + 1, result, options.show_session_id);
+            print_result_header(i + 1, result, options.show_session_id, options.show_scores);
             if show_context {
                 print_result_with_context(result, options, &session_messages);
             } else {
@@ -351,7 +410,12 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
 }
 
 /// Prints the header for a search result.
-fn print_result_header(num: usize, result: &SearchResult, show_session_id: bool) {
+fn print_result_header(
+    num: usize,
+    result: &SearchResult,
+    show_session_id: bool,
+    show_scores: bool,
+) {
     let project_display = result.project.as_ref().map_or("unknown", |p| {
         // Show just the last path component
         p.rsplit('/').next().unwrap_or(p)
@@ -359,6 +423,11 @@ fn print_result_header(num: usize, result: &SearchResult, show_session_id: bool)
 
     let label = result.display_label();
     let time_display = format_relative_time(result.timestamp.as_deref());
+    let score_display = if show_scores {
+        format!(" | Score: {:.2}", result.score)
+    } else {
+        String::new()
+    };
 
     if show_session_id {
         let session_display = result
@@ -366,25 +435,25 @@ fn print_result_header(num: usize, result: &SearchResult, show_session_id: bool)
             .as_ref()
             .map_or("unknown", |s| &s[..s.len().min(8)]);
         println!(
-            "[{}] {} | {} | {} | {} | Score: {:.4} | sess:{}",
+            "[{}] {} | {} | {} | {}{} | sess:{}",
             num,
             result.chunk_kind,
             project_display,
             label,
             time_display,
-            result.score,
+            score_display,
             session_display
         );
     } else {
         println!(
-            "[{}] {} | {} | {} | {} | Score: {:.4}",
-            num, result.chunk_kind, project_display, label, time_display, result.score
+            "[{}] {} | {} | {} | {}{}",
+            num, result.chunk_kind, project_display, label, time_display, score_display
         );
     }
 }
 
 /// Prints a compact single-line search result.
-fn print_result_compact(num: usize, result: &SearchResult) {
+fn print_result_compact(num: usize, result: &SearchResult, show_scores: bool) {
     let project_display = result
         .project
         .as_ref()
@@ -398,9 +467,16 @@ fn print_result_compact(num: usize, result: &SearchResult) {
         .map_or("--------", |s| &s[..s.len().min(8)]);
     let snippet = truncate_text(&result.content, 60);
 
-    println!(
-        "[{num}] {project_display} | {label} | {time_display} | {session_display} | \"{snippet}\""
-    );
+    if show_scores {
+        println!(
+            "[{num}] {:.2} | {project_display} | {label} | {time_display} | {session_display} | \"{snippet}\"",
+            result.score
+        );
+    } else {
+        println!(
+            "[{num}] {project_display} | {label} | {time_display} | {session_display} | \"{snippet}\""
+        );
+    }
 }
 
 /// Formats a timestamp as relative time (e.g., "2h ago", "3 days ago").
@@ -783,11 +859,14 @@ pub fn related(session_id: &str, limit: usize) -> Result<()> {
     };
 
     // Find and rank related sessions
-    let ranked = find_related_sessions(&db, &avg_embedding, &full_session_id, limit)?;
+    let mut ranked = find_related_sessions(&db, &avg_embedding, &full_session_id, limit)?;
     if ranked.is_empty() {
         println!("No related sessions found.");
         return Ok(());
     }
+
+    // Normalize scores to 0-1 range
+    normalize_ranked_sessions(&mut ranked);
 
     print_related_sessions(&ranked);
     Ok(())

@@ -285,6 +285,7 @@ impl Database {
     /// Full-text search using FTS5.
     #[allow(clippy::cast_possible_wrap)]
     pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let escaped_query = escape_fts_query(query);
         let mut stmt = self.conn.prepare(
             r"
             SELECT d.id, d.chunk_kind, d.content, d.project, d.session_id,
@@ -299,7 +300,7 @@ impl Database {
         )?;
 
         let results = stmt
-            .query_map(params![query, limit as i64], |row| {
+            .query_map(params![escaped_query, limit as i64], |row| {
                 Ok(SearchResult {
                     id: row.get(0)?,
                     chunk_kind: row.get(1)?,
@@ -330,6 +331,7 @@ impl Database {
         tool_name: Option<&str>,
         errors_only: bool,
     ) -> Result<Vec<SearchResult>> {
+        let escaped_query = escape_fts_query(query);
         let mut sql = String::from(
             r"
             SELECT d.id, d.chunk_kind, d.content, d.project, d.session_id,
@@ -359,7 +361,7 @@ impl Database {
         let mut stmt = self.conn.prepare(&sql)?;
 
         // Build dynamic parameters
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_string())];
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(escaped_query)];
 
         if let Some(ck) = chunk_kind {
             params_vec.push(Box::new(ck.as_str().to_string()));
@@ -829,6 +831,37 @@ fn bytes_to_embedding(bytes: &[u8]) -> Vec<f32> {
 /// Converts an f32 slice to bytes for sqlite-vec.
 fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
     embedding.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+/// Escapes a query for FTS5 by quoting terms with special characters.
+///
+/// FTS5 interprets certain characters as operators:
+/// - `-` is treated as column prefix (e.g., `sqlite-vec` becomes `column:value`)
+/// - `:` is the column selector
+/// - `()` are grouping operators
+/// - `*` is a prefix wildcard
+///
+/// This function quotes any term containing these characters to ensure
+/// literal matching.
+fn escape_fts_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|term| {
+            // Quote terms with FTS5 special chars
+            if term.contains('-')
+                || term.contains(':')
+                || term.contains('(')
+                || term.contains(')')
+                || term.contains('*')
+            {
+                // Escape any existing quotes by doubling them
+                format!("\"{}\"", term.replace('"', "\"\""))
+            } else {
+                term.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Reciprocal Rank Fusion for combining search results.

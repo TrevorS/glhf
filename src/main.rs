@@ -147,6 +147,10 @@ EXAMPLES:
         #[arg(long = "show-session-id")]
         show_session_id: bool,
 
+        /// Show relevance scores (for debugging/tuning)
+        #[arg(long = "scores")]
+        scores: bool,
+
         /// Only show results since a given time (e.g., 1h, 2d, 1w, or 2024-12-01)
         #[arg(long = "since", value_name = "DURATION", value_parser = parse_since)]
         since: Option<DateTime<Utc>>,
@@ -225,6 +229,7 @@ fn main() -> Result<()> {
             json,
             compact,
             show_session_id,
+            scores,
             since,
         } => {
             let options = SearchOptions {
@@ -243,6 +248,7 @@ fn main() -> Result<()> {
                 compact,
                 show_session_id,
                 since,
+                show_scores: scores,
             };
             glhf::commands::search(&query, &options)?;
         }
