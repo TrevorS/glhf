@@ -130,6 +130,14 @@ enum Commands {
         #[arg(long = "json")]
         json: bool,
 
+        /// Compact output format (one line per result)
+        #[arg(long = "compact")]
+        compact: bool,
+
+        /// Show session IDs in results (for jumping to full session)
+        #[arg(long = "show-session-id")]
+        show_session_id: bool,
+
         /// Only show results since a given time (e.g., 1h, 2d, 1w, or 2024-12-01)
         #[arg(long = "since", value_name = "DURATION", value_parser = parse_since)]
         since: Option<DateTime<Utc>>,
@@ -137,6 +145,9 @@ enum Commands {
 
     /// Show index status and statistics
     Status,
+
+    /// List all indexed projects
+    Projects,
 
     /// View a full conversation session
     Session {
@@ -146,6 +157,24 @@ enum Commands {
         /// Output as JSON (machine-readable)
         #[arg(long = "json")]
         json: bool,
+
+        /// Show only first N messages
+        #[arg(short, long)]
+        limit: Option<usize>,
+
+        /// Show session summary without full content
+        #[arg(long)]
+        summary: bool,
+    },
+
+    /// Find sessions related to a given session
+    Related {
+        /// Session ID to find related sessions for
+        session_id: String,
+
+        /// Maximum number of related sessions to show
+        #[arg(short, long, default_value = "5")]
+        limit: usize,
     },
 }
 
@@ -174,6 +203,8 @@ fn main() -> Result<()> {
             messages_only,
             tools_only,
             json,
+            compact,
+            show_session_id,
             since,
         } => {
             let options = SearchOptions {
@@ -189,6 +220,8 @@ fn main() -> Result<()> {
                 messages_only,
                 tools_only,
                 json,
+                compact,
+                show_session_id,
                 since,
             };
             glhf::commands::search(&query, &options)?;
@@ -196,8 +229,19 @@ fn main() -> Result<()> {
         Commands::Status => {
             glhf::commands::status()?;
         }
-        Commands::Session { session_id, json } => {
-            glhf::commands::session(&session_id, json)?;
+        Commands::Projects => {
+            glhf::commands::projects()?;
+        }
+        Commands::Session {
+            session_id,
+            json,
+            limit,
+            summary,
+        } => {
+            glhf::commands::session(&session_id, json, limit, summary)?;
+        }
+        Commands::Related { session_id, limit } => {
+            glhf::commands::related(&session_id, limit)?;
         }
     }
 

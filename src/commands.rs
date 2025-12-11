@@ -62,6 +62,10 @@ pub struct SearchOptions {
     pub tools_only: bool,
     /// Output results as JSON.
     pub json: bool,
+    /// Compact output format (one line per result).
+    pub compact: bool,
+    /// Show session IDs in results.
+    pub show_session_id: bool,
     /// Only show results since this timestamp.
     pub since: Option<DateTime<Utc>>,
 }
@@ -303,21 +307,25 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
 
     println!("Found {} results:\n", results.len());
     for (i, result) in results.iter().enumerate() {
-        print_result_header(i + 1, result);
-        if show_context {
-            print_result_with_context(result, options, &session_messages);
+        if options.compact {
+            print_result_compact(i + 1, result);
         } else {
-            println!(
-                "    \"{}\"\n",
-                truncate_text(&result.content, RESULT_SNIPPET_LEN)
-            );
+            print_result_header(i + 1, result, options.show_session_id);
+            if show_context {
+                print_result_with_context(result, options, &session_messages);
+            } else {
+                println!(
+                    "    \"{}\"\n",
+                    truncate_text(&result.content, RESULT_SNIPPET_LEN)
+                );
+            }
         }
     }
     Ok(())
 }
 
 /// Prints the header for a search result.
-fn print_result_header(num: usize, result: &SearchResult) {
+fn print_result_header(num: usize, result: &SearchResult, show_session_id: bool) {
     let project_display = result.project.as_ref().map_or("unknown", |p| {
         // Show just the last path component
         p.rsplit('/').next().unwrap_or(p)
@@ -326,10 +334,41 @@ fn print_result_header(num: usize, result: &SearchResult) {
     let label = result.display_label();
     let time_display = format_relative_time(result.timestamp.as_deref());
 
-    println!(
-        "[{}] {} | {} | {} | {} | Score: {:.4}",
-        num, result.chunk_kind, project_display, label, time_display, result.score
-    );
+    if show_session_id {
+        let session_display = result
+            .session_id
+            .as_ref()
+            .map_or("unknown", |s| &s[..s.len().min(8)]);
+        println!(
+            "[{}] {} | {} | {} | {} | Score: {:.4} | sess:{}",
+            num,
+            result.chunk_kind,
+            project_display,
+            label,
+            time_display,
+            result.score,
+            session_display
+        );
+    } else {
+        println!(
+            "[{}] {} | {} | {} | {} | Score: {:.4}",
+            num, result.chunk_kind, project_display, label, time_display, result.score
+        );
+    }
+}
+
+/// Prints a compact single-line search result.
+fn print_result_compact(num: usize, result: &SearchResult) {
+    let project_display = result
+        .project
+        .as_ref()
+        .map_or("unknown", |p| p.rsplit('/').next().unwrap_or(p));
+
+    let label = result.display_label();
+    let time_display = format_relative_time(result.timestamp.as_deref());
+    let snippet = truncate_text(&result.content, 60);
+
+    println!("[{num}] {project_display} | {label} | {time_display} | \"{snippet}\"");
 }
 
 /// Formats a timestamp as relative time (e.g., "2h ago", "3 days ago").
@@ -445,11 +484,46 @@ pub fn status() -> Result<()> {
     Ok(())
 }
 
+/// Lists all indexed projects with stats.
+pub fn projects() -> Result<()> {
+    let db_path = config::database_path()?;
+    if !db_path.exists() {
+        return Err(Error::DatabaseNotFound { path: db_path }.into());
+    }
+
+    let db = Database::open(&db_path).context("Failed to open database")?;
+    let projects = db.list_projects()?;
+
+    if projects.is_empty() {
+        println!("No projects found.");
+        return Ok(());
+    }
+
+    println!("Projects ({} total)", projects.len());
+    println!("{}", "─".repeat(50));
+
+    for (project, doc_count, last_activity) in &projects {
+        // Show just the last path component as the display name
+        let display_name = project.rsplit('/').next().unwrap_or(project);
+        let time_display = format_relative_time(last_activity.as_deref());
+
+        // Pad the name for alignment
+        println!(
+            "{:<20} {:>6} docs    last: {}",
+            truncate_text(display_name, 20),
+            doc_count,
+            time_display
+        );
+    }
+
+    Ok(())
+}
+
 /// Views a full conversation session by session ID.
 ///
 /// Supports partial session ID matching. If multiple sessions match,
 /// lists them for the user to choose from.
-pub fn session(session_id: &str, json: bool) -> Result<()> {
+pub fn session(session_id: &str, json: bool, limit: Option<usize>, summary: bool) -> Result<()> {
     let db_path = config::database_path()?;
     if !db_path.exists() {
         return Err(Error::DatabaseNotFound { path: db_path }.into());
@@ -487,9 +561,20 @@ pub fn session(session_id: &str, json: bool) -> Result<()> {
         return Ok(());
     }
 
+    // Summary mode
+    if summary {
+        print_session_summary(full_session_id, project.as_deref(), &messages);
+        return Ok(());
+    }
+
     // JSON output
     if json {
-        println!("{}", serde_json::to_string_pretty(&messages)?);
+        let output_messages: Vec<_> = if let Some(n) = limit {
+            messages.into_iter().take(n).collect()
+        } else {
+            messages
+        };
+        println!("{}", serde_json::to_string_pretty(&output_messages)?);
         return Ok(());
     }
 
@@ -497,19 +582,327 @@ pub fn session(session_id: &str, json: bool) -> Result<()> {
     let project_display = project
         .as_ref()
         .map_or("unknown", |p| p.rsplit('/').next().unwrap_or(p));
+
+    let display_count = limit.unwrap_or(messages.len()).min(messages.len());
+    let truncated = limit.is_some() && limit.unwrap() < messages.len();
+
     println!(
-        "Session: {} | {} | {} items\n",
+        "Session: {} | {} | {} items{}\n",
         full_session_id,
         project_display,
-        messages.len()
+        messages.len(),
+        if truncated {
+            format!(" (showing first {display_count})")
+        } else {
+            String::new()
+        }
     );
     println!("{}", "─".repeat(60));
 
-    for msg in &messages {
+    for msg in messages.iter().take(display_count) {
         print_session_message(msg);
     }
 
+    if truncated {
+        println!(
+            "\n... {} more messages not shown",
+            messages.len() - display_count
+        );
+    }
+
     Ok(())
+}
+
+/// Prints a summary of a session without full content.
+fn print_session_summary(session_id: &str, project: Option<&str>, messages: &[SearchResult]) {
+    use std::collections::HashMap;
+
+    let project_display = project.map_or("unknown", |p| p.rsplit('/').next().unwrap_or(p));
+
+    // Count by chunk kind
+    let mut kind_counts: HashMap<&str, usize> = HashMap::new();
+    for msg in messages {
+        *kind_counts.entry(msg.chunk_kind.as_str()).or_insert(0) += 1;
+    }
+
+    // Count by role (for messages)
+    let mut role_counts: HashMap<&str, usize> = HashMap::new();
+    for msg in messages.iter().filter(|m| m.chunk_kind == "message") {
+        if let Some(role) = &msg.role {
+            *role_counts.entry(role.as_str()).or_insert(0) += 1;
+        }
+    }
+
+    // Count tools used
+    let mut tool_counts: HashMap<&str, usize> = HashMap::new();
+    for msg in messages.iter().filter(|m| m.chunk_kind == "tool_use") {
+        if let Some(tool) = &msg.tool_name {
+            *tool_counts.entry(tool.as_str()).or_insert(0) += 1;
+        }
+    }
+
+    // Calculate duration
+    let first_ts = messages.first().and_then(|m| m.timestamp.as_ref());
+    let last_ts = messages.last().and_then(|m| m.timestamp.as_ref());
+    let duration = match (first_ts, last_ts) {
+        (Some(first), Some(last)) => {
+            if let (Ok(f), Ok(l)) = (
+                chrono::DateTime::parse_from_rfc3339(first),
+                chrono::DateTime::parse_from_rfc3339(last),
+            ) {
+                let dur = l.signed_duration_since(f);
+                format_duration(dur)
+            } else {
+                "unknown".to_string()
+            }
+        }
+        _ => "unknown".to_string(),
+    };
+
+    let started = format_relative_time(first_ts.map(std::string::String::as_str));
+
+    println!("Session: {session_id}");
+    println!("Project: {project_display}");
+    println!("Duration: {duration} (started {started})");
+    println!("Messages: {} total", messages.len());
+
+    // Role breakdown
+    if !role_counts.is_empty() {
+        let mut roles: Vec<_> = role_counts.into_iter().collect();
+        roles.sort_by(|a, b| b.1.cmp(&a.1));
+        for (role, count) in roles {
+            println!("  - {role}: {count}");
+        }
+    }
+
+    // Tool use breakdown
+    if let Some(&tool_use_count) = kind_counts.get("tool_use") {
+        println!("  - tool calls: {tool_use_count}");
+    }
+    if let Some(&tool_result_count) = kind_counts.get("tool_result") {
+        println!("  - tool results: {tool_result_count}");
+    }
+
+    // Top tools
+    if !tool_counts.is_empty() {
+        let mut tools: Vec<_> = tool_counts.into_iter().collect();
+        tools.sort_by(|a, b| b.1.cmp(&a.1));
+        let top_tools: Vec<_> = tools
+            .iter()
+            .take(5)
+            .map(|(t, c)| format!("{t} ({c})"))
+            .collect();
+        println!("Tools used: {}", top_tools.join(", "));
+    }
+}
+
+/// Formats a duration in a human-readable way.
+fn format_duration(dur: chrono::Duration) -> String {
+    let total_secs = dur.num_seconds();
+    if total_secs < 60 {
+        format!("{total_secs}s")
+    } else if total_secs < 3600 {
+        format!("{}m", total_secs / 60)
+    } else {
+        let hours = total_secs / 3600;
+        let mins = (total_secs % 3600) / 60;
+        if mins > 0 {
+            format!("{hours}h {mins}m")
+        } else {
+            format!("{hours}h")
+        }
+    }
+}
+
+/// Ranked session info tuple for related session results.
+type RankedSession = (String, f64, Option<String>, Option<String>, String);
+
+/// Aggregated session score during related session computation.
+type SessionScoreEntry = (f64, usize, Option<String>, Option<String>, String);
+
+/// Finds sessions related to a given session using embedding similarity.
+pub fn related(session_id: &str, limit: usize) -> Result<()> {
+    use crate::db::EMBEDDING_DIM;
+
+    let db_path = config::database_path()?;
+    if !db_path.exists() {
+        return Err(Error::DatabaseNotFound { path: db_path }.into());
+    }
+
+    let db = Database::open(&db_path).context("Failed to open database")?;
+
+    if !db.has_embeddings()? {
+        println!("No embeddings found. Run 'glhf index' to enable semantic search.");
+        return Ok(());
+    }
+
+    // Find and validate session
+    let Some((full_session_id, project)) = resolve_session(&db, session_id)? else {
+        return Ok(());
+    };
+
+    let project_display = project_name(project.as_deref());
+    println!("Finding sessions related to: {full_session_id} ({project_display})\n");
+
+    // Get session embedding
+    let Some(avg_embedding) = compute_session_embedding(&db, &full_session_id, EMBEDDING_DIM)?
+    else {
+        return Ok(());
+    };
+
+    // Find and rank related sessions
+    let ranked = find_related_sessions(&db, &avg_embedding, &full_session_id, limit)?;
+    if ranked.is_empty() {
+        println!("No related sessions found.");
+        return Ok(());
+    }
+
+    print_related_sessions(&ranked);
+    Ok(())
+}
+
+/// Resolves a partial session ID to a full session ID and project.
+fn resolve_session(db: &Database, session_id: &str) -> Result<Option<(String, Option<String>)>> {
+    let matches = db.find_sessions(session_id)?;
+
+    if matches.is_empty() {
+        println!("No sessions found matching: {session_id}");
+        return Ok(None);
+    }
+
+    if matches.len() > 1 {
+        println!("Multiple sessions match '{session_id}':\n");
+        for (id, count, project) in &matches {
+            println!(
+                "  {id} ({count} items) - {}",
+                project_name(project.as_deref())
+            );
+        }
+        println!("\nSpecify a more complete session ID.");
+        return Ok(None);
+    }
+
+    let (full_id, _, project) = matches.into_iter().next().unwrap();
+    Ok(Some((full_id, project)))
+}
+
+/// Computes an averaged embedding for a session by sampling its documents.
+fn compute_session_embedding(
+    db: &Database,
+    session_id: &str,
+    dim: usize,
+) -> Result<Option<Vec<f32>>> {
+    let doc_ids = db.get_session_doc_ids(session_id)?;
+    if doc_ids.is_empty() {
+        println!("Session has no documents.");
+        return Ok(None);
+    }
+
+    // Sample if too many docs
+    let sample_ids: Vec<String> = if doc_ids.len() > 100 {
+        let step = doc_ids.len() / 100;
+        doc_ids.into_iter().step_by(step).take(100).collect()
+    } else {
+        doc_ids
+    };
+
+    let embeddings = db.get_embeddings_for_docs(&sample_ids)?;
+    if embeddings.is_empty() {
+        println!("No embeddings found for this session.");
+        return Ok(None);
+    }
+
+    Ok(Some(average_embeddings(&embeddings, dim)))
+}
+
+/// Finds sessions related to the given embedding, excluding the source session.
+fn find_related_sessions(
+    db: &Database,
+    embedding: &[f32],
+    exclude_session: &str,
+    limit: usize,
+) -> Result<Vec<RankedSession>> {
+    use std::collections::HashMap;
+
+    let similar_docs =
+        db.search_vector_excluding_session(embedding, exclude_session, limit * 20)?;
+    if similar_docs.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Aggregate scores by session
+    let mut scores: HashMap<String, SessionScoreEntry> = HashMap::new();
+
+    for doc in &similar_docs {
+        if let Some(sess_id) = &doc.session_id {
+            let entry = scores.entry(sess_id.clone()).or_insert((
+                0.0,
+                0,
+                doc.project.clone(),
+                doc.timestamp.clone(),
+                doc.content.clone(),
+            ));
+            entry.0 += doc.score;
+            entry.1 += 1;
+        }
+    }
+
+    // Convert to ranked list
+    let mut ranked: Vec<RankedSession> = scores
+        .into_iter()
+        .map(|(id, (total, count, proj, ts, content))| {
+            (id, total / count as f64, proj, ts, content)
+        })
+        .collect();
+
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(limit);
+    Ok(ranked)
+}
+
+/// Prints the list of related sessions.
+fn print_related_sessions(sessions: &[RankedSession]) {
+    println!("Related sessions:\n");
+    for (i, (sess_id, score, proj, timestamp, sample)) in sessions.iter().enumerate() {
+        let proj_display = project_name(proj.as_deref());
+        let time_display = format_relative_time(timestamp.as_deref());
+        let snippet = truncate_text(sample, 60);
+
+        println!(
+            "[{}] {} | {} | {} | Score: {:.2}",
+            i + 1,
+            &sess_id[..sess_id.len().min(8)],
+            proj_display,
+            time_display,
+            score
+        );
+        println!("    \"{snippet}\"\n");
+    }
+}
+
+/// Extracts just the project name from a full path.
+fn project_name(project: Option<&str>) -> &str {
+    project.map_or("unknown", |p| p.rsplit('/').next().unwrap_or(p))
+}
+
+/// Averages a list of embeddings into a single embedding.
+fn average_embeddings(embeddings: &[Vec<f32>], dim: usize) -> Vec<f32> {
+    let mut avg = vec![0.0_f32; dim];
+    let count = embeddings.len() as f32;
+
+    for embedding in embeddings {
+        for (i, val) in embedding.iter().enumerate() {
+            if i < dim {
+                avg[i] += val;
+            }
+        }
+    }
+
+    for val in &mut avg {
+        *val /= count;
+    }
+
+    avg
 }
 
 /// Prints a single message in session view format.

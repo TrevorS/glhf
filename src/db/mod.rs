@@ -583,6 +583,136 @@ impl Database {
     pub fn has_embeddings(&self) -> Result<bool> {
         Ok(self.embedding_count()? > 0)
     }
+
+    /// Lists all indexed projects with document counts and last activity.
+    pub fn list_projects(&self) -> Result<Vec<(String, i64, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            r"
+            SELECT project, COUNT(*) as doc_count, MAX(timestamp) as last_activity
+            FROM documents
+            WHERE project IS NOT NULL
+            GROUP BY project
+            ORDER BY last_activity DESC
+            ",
+        )?;
+
+        let results = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(results)
+    }
+
+    /// Gets document IDs for a session (for embedding lookup).
+    pub fn get_session_doc_ids(&self, session_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            r"
+            SELECT id FROM documents
+            WHERE session_id = ?1
+            ",
+        )?;
+
+        let results = stmt
+            .query_map(params![session_id], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(results)
+    }
+
+    /// Gets embeddings for a list of document IDs.
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn get_embeddings_for_docs(&self, doc_ids: &[String]) -> Result<Vec<Vec<f32>>> {
+        if doc_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let placeholders: Vec<_> = (1..=doc_ids.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT embedding FROM documents_vec WHERE id IN ({})",
+            placeholders.join(", ")
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> = doc_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
+
+        let results = stmt
+            .query_map(params.as_slice(), |row| {
+                let blob: Vec<u8> = row.get(0)?;
+                Ok(bytes_to_embedding(&blob))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(results)
+    }
+
+    /// Searches for documents similar to an averaged embedding, excluding a session.
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn search_vector_excluding_session(
+        &self,
+        query_embedding: &[f32],
+        exclude_session: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let embedding_bytes = embedding_to_bytes(query_embedding);
+
+        // We fetch more and filter, since we can't filter in the vec query
+        let fetch_limit = limit * 10;
+
+        let mut stmt = self.conn.prepare(
+            r"
+            SELECT v.id, v.distance, d.chunk_kind, d.content, d.project, d.session_id,
+                   d.role, d.tool_name, d.tool_id, d.tool_input, d.is_error, d.timestamp
+            FROM documents_vec v
+            JOIN documents d ON d.id = v.id
+            WHERE embedding MATCH ?1 AND k = ?2
+            ORDER BY distance
+            ",
+        )?;
+
+        let mut results = Vec::new();
+        let rows = stmt.query_map(params![embedding_bytes, fetch_limit as i64], |row| {
+            Ok(SearchResult {
+                id: row.get(0)?,
+                score: 1.0 - row.get::<_, f64>(1)?,
+                chunk_kind: row.get(2)?,
+                content: row.get(3)?,
+                project: row.get(4)?,
+                session_id: row.get(5)?,
+                role: row.get(6)?,
+                tool_name: row.get(7)?,
+                tool_id: row.get(8)?,
+                tool_input: row.get(9)?,
+                is_error: row.get(10)?,
+                timestamp: row.get(11)?,
+            })
+        })?;
+
+        for row in rows {
+            let result = row?;
+            // Skip results from the excluded session
+            if result.session_id.as_deref() != Some(exclude_session) {
+                results.push(result);
+                if results.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        Ok(results)
+    }
+}
+
+/// Converts bytes back to an f32 embedding vector.
+fn bytes_to_embedding(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
 }
 
 /// Converts an f32 slice to bytes for sqlite-vec.
