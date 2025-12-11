@@ -19,6 +19,10 @@ enum CliSearchMode {
     Text,
     /// Semantic/vector search only
     Semantic,
+    /// Adaptive: routes to BM25-only when confident, else hybrid
+    Adaptive,
+    /// Reranked: hybrid search with cross-encoder reranking
+    Reranked,
 }
 
 impl From<CliSearchMode> for SearchMode {
@@ -27,6 +31,8 @@ impl From<CliSearchMode> for SearchMode {
             CliSearchMode::Hybrid => SearchMode::Hybrid,
             CliSearchMode::Text => SearchMode::Text,
             CliSearchMode::Semantic => SearchMode::Semantic,
+            CliSearchMode::Adaptive => SearchMode::Adaptive,
+            CliSearchMode::Reranked => SearchMode::Reranked,
         }
     }
 }

@@ -4,7 +4,7 @@
 //!
 //! This crate provides hybrid search (FTS5 + semantic) over the conversation data
 //! stored in `~/.claude` by Claude Code. It parses JSONL conversation files,
-//! extracts messages, generates embeddings, and indexes them in SQLite for fast retrieval.
+//! extracts messages, generates embeddings, and indexes them in `SQLite` for fast retrieval.
 //!
 //! ## Quick Start
 //!
@@ -18,7 +18,7 @@
 //!
 //! // Create database and embedder
 //! let mut db = Database::open(std::path::Path::new("/tmp/glhf.db")).unwrap();
-//! let embedder = Embedder::new().unwrap();
+//! let mut embedder = Embedder::new().unwrap();
 //!
 //! // Insert documents
 //! db.insert_documents(&documents).unwrap();
@@ -46,8 +46,10 @@ pub mod config;
 pub mod db;
 pub mod embed;
 pub mod error;
+pub mod eval;
 pub mod ingest;
 pub mod models;
+pub mod rerank;
 
 pub use error::{Error, Result};
 pub use models::document::{ChunkKind, Document};

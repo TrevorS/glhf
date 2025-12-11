@@ -1,4 +1,4 @@
-//! SQLite database layer with FTS5 and vector search support.
+//! `SQLite` database layer with FTS5 and vector search support.
 //!
 //! This module provides unified storage for documents, full-text search via FTS5,
 //! and vector similarity search via sqlite-vec.
@@ -6,6 +6,7 @@
 use crate::models::document::{ChunkKind, Document};
 use crate::Result;
 use rusqlite::{params, Connection};
+use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Once;
 
@@ -15,13 +16,14 @@ pub const EMBEDDING_DIM: usize = 384;
 /// Ensures sqlite-vec is registered only once per process.
 static SQLITE_VEC_INIT: Once = Once::new();
 
-/// Registers the sqlite-vec extension globally using sqlite3_auto_extension.
+/// Registers the sqlite-vec extension globally using `sqlite3_auto_extension`.
 /// This must be called before opening any connections that need vector support.
 fn init_sqlite_vec() {
     SQLITE_VEC_INIT.call_once(|| {
         // SAFETY: sqlite3_auto_extension is thread-safe and sqlite3_vec_init
         // is a valid extension entry point. We use transmute because the function
         // signatures differ slightly but are compatible.
+        #[allow(unsafe_code, clippy::missing_transmute_annotations)]
         unsafe {
             rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
                 sqlite_vec::sqlite3_vec_init as *const (),
@@ -67,7 +69,7 @@ impl SearchResult {
     }
 }
 
-/// SQLite database with FTS5 and vector search capabilities.
+/// `SQLite` database with FTS5 and vector search capabilities.
 pub struct Database {
     conn: Connection,
 }
@@ -265,22 +267,25 @@ impl Database {
     }
 
     /// Returns the number of documents in the database.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn document_count(&self) -> Result<usize> {
         let count: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))?;
-        Ok(count as usize)
+        Ok(count.max(0) as usize)
     }
 
     /// Returns the number of embeddings in the database.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn embedding_count(&self) -> Result<usize> {
         let count: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM documents_vec", [], |row| row.get(0))?;
-        Ok(count as usize)
+        Ok(count.max(0) as usize)
     }
 
     /// Full-text search using FTS5.
+    #[allow(clippy::cast_possible_wrap)]
     pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let mut stmt = self.conn.prepare(
             r"
@@ -317,6 +322,7 @@ impl Database {
     }
 
     /// Full-text search with filters.
+    #[allow(clippy::cast_possible_wrap)]
     pub fn search_fts_filtered(
         &self,
         query: &str,
@@ -338,15 +344,15 @@ impl Database {
 
         let mut param_idx = 2;
         if chunk_kind.is_some() {
-            sql.push_str(&format!(" AND d.chunk_kind = ?{param_idx}"));
+            let _ = write!(sql, " AND d.chunk_kind = ?{param_idx}");
             param_idx += 1;
         }
         if tool_name.is_some() {
-            sql.push_str(&format!(" AND LOWER(d.tool_name) = LOWER(?{param_idx})"));
+            let _ = write!(sql, " AND LOWER(d.tool_name) = LOWER(?{param_idx})");
             param_idx += 1;
         }
         if errors_only {
-            sql.push_str(&format!(" AND d.is_error = ?{param_idx}"));
+            let _ = write!(sql, " AND d.is_error = ?{param_idx}");
         }
 
         sql.push_str(" ORDER BY score LIMIT ?");
@@ -367,8 +373,7 @@ impl Database {
         }
         params_vec.push(Box::new(limit as i64));
 
-        let params_refs: Vec<&dyn rusqlite::ToSql> =
-            params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(AsRef::as_ref).collect();
 
         let results = stmt
             .query_map(params_refs.as_slice(), |row| {
@@ -392,6 +397,7 @@ impl Database {
     }
 
     /// Vector similarity search using sqlite-vec.
+    #[allow(clippy::cast_possible_wrap)]
     pub fn search_vector(
         &self,
         query_embedding: &[f32],
@@ -448,6 +454,48 @@ impl Database {
         // RRF fusion
         let fused = rrf_fusion(&fts_results, &vec_results, limit);
         Ok(fused)
+    }
+
+    /// Adaptive hybrid search - routes based on BM25/vector result agreement.
+    ///
+    /// When BM25 and vector search agree on top results, uses hybrid RRF fusion.
+    /// When they disagree and BM25 has high confidence, trusts BM25 alone.
+    /// This prevents low-quality vector results from diluting good BM25 matches.
+    pub fn search_hybrid_adaptive(
+        &self,
+        query: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let fetch_limit = limit * 3;
+
+        // Run both searches
+        let bm25_results = self.search_fts(query, fetch_limit)?;
+        let vector_results = self.search_vector(query_embedding, fetch_limit)?;
+
+        // Check if top results agree
+        let top1_match = !bm25_results.is_empty()
+            && !vector_results.is_empty()
+            && bm25_results[0].id == vector_results[0].id;
+
+        // Check BM25 confidence: high score with clear gap to #2
+        let bm25_confident = bm25_results.len() >= 2
+            && bm25_results[0].score > 10.0
+            && (bm25_results[0].score - bm25_results[1].score) > 3.0;
+
+        // Route decision
+        if top1_match {
+            // Agreement - hybrid fusion is safe
+            let fused = rrf_fusion(&bm25_results, &vector_results, limit);
+            Ok(fused)
+        } else if bm25_confident {
+            // Disagreement + BM25 confident - trust BM25 alone
+            Ok(bm25_results.into_iter().take(limit).collect())
+        } else {
+            // Uncertain - hedge with hybrid fusion
+            let fused = rrf_fusion(&bm25_results, &vector_results, limit);
+            Ok(fused)
+        }
     }
 
     /// Gets all messages for a session (for context display).

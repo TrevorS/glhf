@@ -1,0 +1,109 @@
+{
+  "queries": [
+    {
+      "id": "q01",
+      "query": "git commit and push changes",
+      "query_type": "semantic",
+      "relevant_doc_ids": ["4540f1a0bf7d56cd", "770effd7049eacea", "b5ea782319a75c65"],
+      "tags": ["git", "workflow"]
+    },
+    {
+      "id": "q02",
+      "query": "cargo build rust project",
+      "query_type": "tool",
+      "relevant_doc_ids": ["6584fa72dea78ac0", "982fb530d2db16dc"],
+      "tags": ["rust", "cargo", "build"]
+    },
+    {
+      "id": "q03",
+      "query": "run python training script",
+      "query_type": "tool",
+      "relevant_doc_ids": ["300a256c3d3a6e4d", "e0da61f41642eb81", "de3b952352b2fe0b"],
+      "tags": ["python", "training", "ml"]
+    },
+    {
+      "id": "q04",
+      "query": "implement struct in rust code",
+      "query_type": "code",
+      "relevant_doc_ids": ["11b5f3774a061699"],
+      "tags": ["rust", "code", "struct"]
+    },
+    {
+      "id": "q05",
+      "query": "error handling and failure messages",
+      "query_type": "error",
+      "relevant_doc_ids": ["a905858b5fc8e256", "678ef338e120e290", "ffebe04ea009460c"],
+      "tags": ["error", "debugging"]
+    },
+    {
+      "id": "q06",
+      "query": "github actions CI workflow",
+      "query_type": "semantic",
+      "relevant_doc_ids": ["fc879fa100685c23"],
+      "tags": ["github", "ci", "automation"]
+    },
+    {
+      "id": "q07",
+      "query": "grep search find pattern in files",
+      "query_type": "tool",
+      "relevant_doc_ids": ["a63c364656c75d8b", "03a486236f9024ca"],
+      "tags": ["grep", "search", "bash"]
+    },
+    {
+      "id": "q08",
+      "query": "run unit tests",
+      "query_type": "semantic",
+      "relevant_doc_ids": ["edfdbb4dfda9e073", "67f3ced2bb7d39fc"],
+      "tags": ["test", "testing"]
+    },
+    {
+      "id": "q09",
+      "query": "curl http request api endpoint",
+      "query_type": "tool",
+      "relevant_doc_ids": ["c4c3b0bd3f952d3f"],
+      "tags": ["curl", "http", "api"]
+    },
+    {
+      "id": "q10",
+      "query": "user interface UI adjustments",
+      "query_type": "semantic",
+      "relevant_doc_ids": ["7583802182155b2a", "edfdbb4dfda9e073"],
+      "tags": ["ui", "frontend"]
+    },
+    {
+      "id": "q11",
+      "query": "refine and update the plan",
+      "query_type": "semantic",
+      "relevant_doc_ids": ["6d6c056f77d86f59"],
+      "tags": ["planning", "workflow"]
+    },
+    {
+      "id": "q12",
+      "query": "poker hand evaluation card game",
+      "query_type": "keyword",
+      "relevant_doc_ids": ["4712d60e6bcce0fa"],
+      "tags": ["poker", "game", "cards"]
+    },
+    {
+      "id": "q13",
+      "query": "room registry actor system",
+      "query_type": "code",
+      "relevant_doc_ids": ["4468e34f05319cf8", "206268378f2ee529"],
+      "tags": ["actor", "room", "gleam"]
+    },
+    {
+      "id": "q14",
+      "query": "symbols and map literals lisp",
+      "query_type": "keyword",
+      "relevant_doc_ids": ["68618a7a62357a5c"],
+      "tags": ["lisp", "symbols"]
+    },
+    {
+      "id": "q15",
+      "query": "view git log history commits",
+      "query_type": "tool",
+      "relevant_doc_ids": ["770effd7049eacea"],
+      "tags": ["git", "log", "history"]
+    }
+  ]
+}

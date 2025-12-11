@@ -16,3 +16,4 @@
 
 # Benchmark artifacts
 /target/criterion
+.fastembed_cache/

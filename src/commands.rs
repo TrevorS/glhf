@@ -6,8 +6,10 @@ use crate::embed::Embedder;
 use crate::error::Error;
 use crate::ingest;
 use crate::models::document::ChunkKind;
+use crate::rerank::Reranker;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::io::Write;
 use std::time::Instant;
 
 /// Search mode for queries.
@@ -20,6 +22,10 @@ pub enum SearchMode {
     Text,
     /// Semantic/vector search only.
     Semantic,
+    /// Adaptive hybrid that routes based on BM25/vector agreement.
+    Adaptive,
+    /// Hybrid search with cross-encoder reranking.
+    Reranked,
 }
 
 /// Options for search command.
@@ -83,7 +89,9 @@ pub fn index(_rebuild: bool, skip_embeddings: bool) -> Result<()> {
     );
 
     // Generate embeddings unless skipped
-    if !skip_embeddings {
+    if skip_embeddings {
+        println!("Skipping embeddings (text search only mode).");
+    } else {
         println!("\nGenerating embeddings (this may take a while on first run)...");
         let embed_start = Instant::now();
 
@@ -92,12 +100,11 @@ pub fn index(_rebuild: bool, skip_embeddings: bool) -> Result<()> {
         // Collect document contents
         let contents: Vec<String> = documents.iter().map(|d| d.content.clone()).collect();
 
-        // Generate embeddings with progress
-        let batch_size = 100;
+        // Generate embeddings with progress (larger batches for Metal GPU efficiency)
+        let batch_size = 2048;
         let embeddings =
             embedder.embed_documents_with_progress(&contents, batch_size, |done, total| {
                 print!("\rEmbedding: {done}/{total} documents");
-                use std::io::Write;
                 std::io::stdout().flush().ok();
             })?;
         println!();
@@ -116,8 +123,6 @@ pub fn index(_rebuild: bool, skip_embeddings: bool) -> Result<()> {
             embeddings.len(),
             embed_time.as_secs_f64()
         );
-    } else {
-        println!("Skipping embeddings (text search only mode).");
     }
 
     // Show database size
@@ -128,25 +133,151 @@ pub fn index(_rebuild: bool, skip_embeddings: bool) -> Result<()> {
     Ok(())
 }
 
+/// Determines the effective search mode, falling back to text if embeddings unavailable.
+fn get_effective_mode(db: &Database, mode: SearchMode) -> Result<SearchMode> {
+    match mode {
+        SearchMode::Hybrid | SearchMode::Semantic | SearchMode::Adaptive | SearchMode::Reranked => {
+            if db.has_embeddings()? {
+                Ok(mode)
+            } else {
+                if mode == SearchMode::Semantic
+                    || mode == SearchMode::Adaptive
+                    || mode == SearchMode::Reranked
+                {
+                    println!("Warning: No embeddings found. Falling back to text search.");
+                    println!(
+                        "Run 'glhf index' without --skip-embeddings to enable semantic search.\n"
+                    );
+                }
+                Ok(SearchMode::Text)
+            }
+        }
+        SearchMode::Text => Ok(mode),
+    }
+}
+
+/// Executes a search with the given mode and returns results.
+fn execute_search(
+    db: &Database,
+    query: &str,
+    options: &SearchOptions,
+    mode: SearchMode,
+    chunk_kind: Option<ChunkKind>,
+    has_filters: bool,
+) -> Result<Vec<SearchResult>> {
+    let results = match mode {
+        SearchMode::Text => {
+            if has_filters {
+                db.search_fts_filtered(
+                    query,
+                    options.limit,
+                    chunk_kind,
+                    options.tool.as_deref(),
+                    options.errors,
+                )?
+            } else {
+                db.search_fts(query, options.limit)?
+            }
+        }
+        SearchMode::Semantic => {
+            let mut embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
+            let query_embedding = embedder.embed_query(query)?;
+            let mut results = db.search_vector(&query_embedding, options.limit * 2)?;
+            if has_filters {
+                results.retain(|r| filter_result(r, options));
+            }
+            results.truncate(options.limit);
+            results
+        }
+        SearchMode::Hybrid => {
+            let mut embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
+            let query_embedding = embedder.embed_query(query)?;
+            let mut results = db.search_hybrid(query, &query_embedding, options.limit * 2)?;
+            if has_filters {
+                results.retain(|r| filter_result(r, options));
+            }
+            results.truncate(options.limit);
+            results
+        }
+        SearchMode::Adaptive => {
+            let mut embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
+            let query_embedding = embedder.embed_query(query)?;
+            let mut results =
+                db.search_hybrid_adaptive(query, &query_embedding, options.limit * 2)?;
+            if has_filters {
+                results.retain(|r| filter_result(r, options));
+            }
+            results.truncate(options.limit);
+            results
+        }
+        SearchMode::Reranked => {
+            let mut embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
+            let query_embedding = embedder.embed_query(query)?;
+
+            // Get top-20 candidates from hybrid search (or more if filtering)
+            let candidate_count = if has_filters { 40 } else { 20 };
+            let mut candidates = db.search_hybrid(query, &query_embedding, candidate_count)?;
+            if candidates.is_empty() {
+                return Ok(vec![]);
+            }
+
+            // Apply filters before reranking
+            if has_filters {
+                candidates.retain(|r| filter_result(r, options));
+            }
+            if candidates.is_empty() {
+                return Ok(vec![]);
+            }
+
+            // Rerank with cross-encoder
+            let mut reranker = Reranker::new_quiet().context("Failed to initialize reranker")?;
+            let contents: Vec<&str> = candidates.iter().map(|r| r.content.as_str()).collect();
+            let scored = reranker.rerank(query, &contents)?;
+
+            // Rebuild results in reranked order
+            scored
+                .into_iter()
+                .take(options.limit)
+                .map(|(idx, score)| {
+                    let mut r = candidates[idx].clone();
+                    r.score = f64::from(score);
+                    r
+                })
+                .collect()
+        }
+    };
+    Ok(results)
+}
+
+/// Fetches session messages for context display.
+fn fetch_session_context(
+    db: &Database,
+    results: &[SearchResult],
+) -> HashMap<String, Vec<SearchResult>> {
+    let mut sessions = HashMap::new();
+    for result in results {
+        if let Some(session_id) = &result.session_id {
+            sessions
+                .entry(session_id.clone())
+                .or_insert_with(|| db.get_session_messages(session_id).unwrap_or_default());
+        }
+    }
+    sessions
+}
+
 /// Searches the database and prints results to stdout.
 pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
     let db_path = config::database_path()?;
-
     if !db_path.exists() {
         return Err(Error::DatabaseNotFound { path: db_path }.into());
     }
 
     let db = Database::open(&db_path).context("Failed to open database")?;
-
-    // Determine chunk_kind filter
     let chunk_kind = options.messages_only.then_some(ChunkKind::Message);
-
-    // Check if we need filtering
     let has_filters =
         options.tool.is_some() || options.errors || options.messages_only || options.tools_only;
 
     let mut results = if options.regex {
-        // Regex search
         let mut results = db.search_regex(query, options.limit * 2, options.ignore_case)?;
         if has_filters {
             results.retain(|r| filter_result(r, options));
@@ -154,106 +285,34 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         results.truncate(options.limit);
         results
     } else {
-        // Determine effective search mode
-        let effective_mode = if options.mode == SearchMode::Hybrid
-            || options.mode == SearchMode::Semantic
-        {
-            // Check if we have embeddings
-            if db.has_embeddings()? {
-                options.mode
-            } else {
-                if options.mode == SearchMode::Semantic {
-                    println!("Warning: No embeddings found. Falling back to text search.");
-                    println!(
-                        "Run 'glhf index' without --skip-embeddings to enable semantic search.\n"
-                    );
-                }
-                SearchMode::Text
-            }
-        } else {
-            options.mode
-        };
-
-        match effective_mode {
-            SearchMode::Text => {
-                if has_filters {
-                    db.search_fts_filtered(
-                        query,
-                        options.limit,
-                        chunk_kind,
-                        options.tool.as_deref(),
-                        options.errors,
-                    )?
-                } else {
-                    db.search_fts(query, options.limit)?
-                }
-            }
-            SearchMode::Semantic => {
-                let embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
-                let query_embedding = embedder.embed_query(query)?;
-                let mut results = db.search_vector(&query_embedding, options.limit * 2)?;
-                if has_filters {
-                    results.retain(|r| filter_result(r, options));
-                }
-                results.truncate(options.limit);
-                results
-            }
-            SearchMode::Hybrid => {
-                let embedder = Embedder::new_quiet().context("Failed to initialize embedder")?;
-                let query_embedding = embedder.embed_query(query)?;
-                let mut results = db.search_hybrid(query, &query_embedding, options.limit * 2)?;
-                if has_filters {
-                    results.retain(|r| filter_result(r, options));
-                }
-                results.truncate(options.limit);
-                results
-            }
-        }
+        let effective_mode = get_effective_mode(&db, options.mode)?;
+        execute_search(&db, query, options, effective_mode, chunk_kind, has_filters)?
     };
 
-    // Additional filtering for tools_only (exclude messages)
     if options.tools_only {
         results.retain(|r| r.chunk_kind != "message");
     }
-
     if results.is_empty() {
         println!("No matches found for: {query}");
         return Ok(());
     }
 
     let show_context = options.before > 0 || options.after > 0;
-
-    // If we need context, fetch session messages
-    let session_messages: HashMap<String, Vec<SearchResult>> = if show_context {
-        let mut sessions = HashMap::new();
-        for result in &results {
-            if let Some(session_id) = &result.session_id {
-                if !sessions.contains_key(session_id) {
-                    if let Ok(msgs) = db.get_session_messages(session_id) {
-                        sessions.insert(session_id.clone(), msgs);
-                    }
-                }
-            }
-        }
-        sessions
+    let session_messages = if show_context {
+        fetch_session_context(&db, &results)
     } else {
         HashMap::new()
     };
 
     println!("Found {} results:\n", results.len());
-
     for (i, result) in results.iter().enumerate() {
         print_result_header(i + 1, result);
-
         if show_context {
             print_result_with_context(result, options, &session_messages);
         } else {
-            // Show snippet of content
-            let snippet = truncate_content(&result.content, 200);
-            println!("    \"{snippet}\"\n");
+            println!("    \"{}\"\n", truncate_content(&result.content, 200));
         }
     }
-
     Ok(())
 }
 

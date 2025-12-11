@@ -55,6 +55,13 @@ pub enum Error {
     /// Invalid regular expression pattern.
     #[error("invalid regex pattern: {0}")]
     Regex(#[from] regex::Error),
+
+    /// A reranking operation failed.
+    #[error("reranking error: {message}")]
+    Reranking {
+        /// A description of what went wrong.
+        message: String,
+    },
 }
 
 impl Error {
