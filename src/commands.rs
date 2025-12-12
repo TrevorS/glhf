@@ -141,10 +141,9 @@ pub struct SearchOptions {
 }
 
 /// Builds or rebuilds the search index from all conversation files.
-pub fn index(_rebuild: bool, skip_embeddings: bool) -> Result<()> {
+pub fn index(skip_embeddings: bool) -> Result<()> {
     let db_path = config::database_path()?;
 
-    // Always rebuild for now
     if db_path.exists() {
         std::fs::remove_file(&db_path)?;
     }

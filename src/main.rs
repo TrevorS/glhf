@@ -64,10 +64,6 @@ impl From<CliSearchMode> for SearchMode {
 enum Commands {
     /// Build or update the search index
     Index {
-        /// Force a full rebuild of the index
-        #[arg(long)]
-        rebuild: bool,
-
         /// Skip embedding generation (text search only)
         #[arg(long)]
         skip_embeddings: bool,
@@ -251,11 +247,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Index {
-            rebuild,
-            skip_embeddings,
-        } => {
-            glhf::commands::index(rebuild, skip_embeddings)?;
+        Commands::Index { skip_embeddings } => {
+            glhf::commands::index(skip_embeddings)?;
         }
         Commands::Search {
             query,

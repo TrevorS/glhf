@@ -109,7 +109,21 @@ glhf search "error" --json
 | `--compact` | Single-line output for quick scanning |
 | `--show-session-id` | Show session IDs for jumping to full context |
 | `--scores` | Show relevance scores (for debugging/tuning) |
+| `--oldest` | Show oldest results first (alias: `--reverse`) |
 | `--json` | Output results as JSON |
+
+#### Session & Project Filtering
+
+| Flag | Purpose |
+|------|---------|
+| `-X, --exclude-project` | Exclude specific project (repeatable) |
+| `--exclude-this-project` | Exclude current project from results |
+| `--include-this-project` | Override project auto-exclusion |
+| `--exclude-this-session` | Exclude current session from results |
+| `--include-this-session` | Override session auto-exclusion |
+| `--this-session` | Show only results from current session |
+
+**Auto-exclusion:** When running inside Claude Code (`CLAUDECODE=1`), the current project and session are auto-excluded to help find solutions from other contexts. Use `--include-*` flags to override.
 
 ### `glhf projects` - List indexed projects
 
@@ -181,6 +195,21 @@ Related sessions:
     "The file..."
 ```
 
+### `glhf recent` - Show recent sessions
+
+Show the most recently modified sessions:
+
+```bash
+# Show 10 most recent sessions
+glhf recent
+
+# Show more sessions
+glhf recent -l 20
+
+# Filter by project
+glhf recent -p myproject
+```
+
 ### `glhf status` - Check index status
 
 ```bash
@@ -200,11 +229,8 @@ Location:   /Users/you/Library/Caches/glhf/glhf.db
 ### `glhf index` - Build/rebuild search index
 
 ```bash
-# Build index (incremental - currently rebuilds fully)
+# Build index (always rebuilds from scratch)
 glhf index
-
-# Force full rebuild
-glhf index --rebuild
 
 # Skip embeddings (text search only, faster)
 glhf index --skip-embeddings
