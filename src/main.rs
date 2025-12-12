@@ -32,7 +32,7 @@ fn parse_since(s: &str) -> Result<DateTime<Utc>, String> {
 }
 
 #[derive(Parser)]
-#[command(name = "glhf", about = "Search your Claude Code history")]
+#[command(name = "glhf", about = "Search your Claude Code history", version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

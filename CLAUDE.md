@@ -108,9 +108,9 @@ glhf is a CLI tool for searching Claude Code conversation history using hybrid s
 
 - **sqlite-vec FFI**: Uses `sqlite3_auto_extension` with a `Once` guard to register the extension before any connection opens. The unsafe transmute is required due to FFI signature differences.
 
-- **Hybrid Search**: Combines FTS5 BM25 scores with vector cosine distance using Reciprocal Rank Fusion (RRF). Each search mode fetches 2x the limit, then fuses/truncates.
+- **Hybrid Search**: Combines FTS5 BM25 scores with vector cosine distance using Reciprocal Rank Fusion (RRF). Short queries (< 15 chars) weight text matches more heavily since semantic models need more context. Each search mode fetches 3x the limit for better fusion.
 
-- **Path Encoding**: Claude Code encodes project paths in directory names: `/` becomes `-`, `/.` becomes `--`. The `config.rs` module handles decoding.
+- **Path Encoding**: Claude Code encodes project paths in directory names: `/` becomes `-`, `/.` becomes `--`. However, the encoding is lossy (hyphens in original names become indistinguishable from separators), so we store raw encoded paths and extract display names via pattern matching (e.g., `-Projects-` marker).
 
 - **Chunk Types**: Three indexed types with shared `DisplayLabel` trait for consistent formatting across `Document` and `SearchResult`.
 

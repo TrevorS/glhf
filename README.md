@@ -108,6 +108,7 @@ glhf search "error" --json
 | `--tools-only` | Only show tool calls (exclude messages) |
 | `--compact` | Single-line output for quick scanning |
 | `--show-session-id` | Show session IDs for jumping to full context |
+| `--scores` | Show relevance scores (for debugging/tuning) |
 | `--json` | Output results as JSON |
 
 ### `glhf projects` - List indexed projects
@@ -240,7 +241,7 @@ glhf search "error" --errors --since 1d
 glhf projects
 
 # Recent activity in current project
-glhf search "" -p . --since 1w --compact -l 20
+glhf search "." -p . --since 1w --compact -l 20
 ```
 
 ### "Find related past sessions"

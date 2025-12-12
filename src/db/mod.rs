@@ -447,6 +447,9 @@ impl Database {
     }
 
     /// Hybrid search combining FTS5 and vector search with RRF fusion.
+    ///
+    /// Short queries (< 20 chars) favor text search since semantic models
+    /// need more context. Longer queries get equal weighting.
     pub fn search_hybrid(
         &self,
         query: &str,
@@ -459,8 +462,11 @@ impl Database {
         let fts_results = self.search_fts(query, fetch_limit)?;
         let vec_results = self.search_vector(query_embedding, fetch_limit)?;
 
-        // RRF fusion
-        let fused = rrf_fusion(&fts_results, &vec_results, limit);
+        // Compute FTS weight based on query length
+        let fts_weight = compute_fts_weight(query);
+
+        // RRF fusion with query-appropriate weighting
+        let fused = rrf_fusion_weighted(&fts_results, &vec_results, limit, fts_weight);
         Ok(fused)
     }
 
@@ -548,6 +554,9 @@ impl Database {
     }
 
     /// Hybrid search with filters, combining FTS5 and vector search with RRF fusion.
+    ///
+    /// Short queries (< 20 chars) favor text search since semantic models
+    /// need more context. Longer queries get equal weighting.
     pub fn search_hybrid_filtered(
         &self,
         query: &str,
@@ -570,8 +579,11 @@ impl Database {
             errors_only,
         )?;
 
-        // RRF fusion
-        let fused = rrf_fusion(&fts_results, &vec_results, limit);
+        // Compute FTS weight based on query length
+        let fts_weight = compute_fts_weight(query);
+
+        // RRF fusion with query-appropriate weighting
+        let fused = rrf_fusion_weighted(&fts_results, &vec_results, limit, fts_weight);
         Ok(fused)
     }
 
@@ -856,11 +868,38 @@ fn escape_fts_query(query: &str) -> String {
         .join(" ")
 }
 
+/// Computes FTS weight for hybrid search based on query length.
+///
+/// Short queries benefit from text matching since semantic models
+/// need more context to produce meaningful embeddings. This function
+/// returns a weight multiplier for FTS scores in RRF fusion:
+///
+/// - Queries < 15 chars: FTS weight 2.5 (strongly favor exact matches)
+/// - Queries 15-30 chars: FTS weight 1.5 (slightly favor text)
+/// - Queries > 30 chars: FTS weight 1.0 (equal weighting)
+fn compute_fts_weight(query: &str) -> f64 {
+    let len = query.trim().len();
+    if len < 15 {
+        2.5
+    } else if len < 30 {
+        1.5
+    } else {
+        1.0
+    }
+}
+
 /// Reciprocal Rank Fusion for combining search results.
-fn rrf_fusion(
+/// Weighted RRF fusion with configurable text weight.
+///
+/// The `fts_weight` parameter controls how much to favor text matches:
+/// - 1.0 = equal weight to FTS and vector (default)
+/// - 2.0 = FTS results count double
+/// - 0.5 = vector results dominate
+fn rrf_fusion_weighted(
     fts_results: &[SearchResult],
     vec_results: &[SearchResult],
     limit: usize,
+    fts_weight: f64,
 ) -> Vec<SearchResult> {
     use std::collections::HashMap;
 
@@ -869,16 +908,16 @@ fn rrf_fusion(
     let mut scores: HashMap<String, f64> = HashMap::new();
     let mut results_map: HashMap<String, SearchResult> = HashMap::new();
 
-    // Score FTS results
+    // Score FTS results (with weight)
     for (rank, result) in fts_results.iter().enumerate() {
-        let rrf_score = 1.0 / (K + rank as f64 + 1.0);
+        let rrf_score = fts_weight / (K + rank as f64 + 1.0);
         *scores.entry(result.id.clone()).or_insert(0.0) += rrf_score;
         results_map
             .entry(result.id.clone())
             .or_insert_with(|| result.clone());
     }
 
-    // Score vector results
+    // Score vector results (weight 1.0)
     for (rank, result) in vec_results.iter().enumerate() {
         let rrf_score = 1.0 / (K + rank as f64 + 1.0);
         *scores.entry(result.id.clone()).or_insert(0.0) += rrf_score;
@@ -1010,7 +1049,7 @@ mod tests {
             },
         ];
 
-        let fused = rrf_fusion(&fts, &vec, 10);
+        let fused = rrf_fusion_weighted(&fts, &vec, 10, 1.0);
 
         // "b" appears in both, should have highest score
         assert_eq!(fused[0].id, "b");

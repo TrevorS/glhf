@@ -66,6 +66,10 @@ pub fn ingest_all() -> Result<Vec<Document>> {
 
 /// Extracts the project name from a JSONL file path.
 ///
+/// Returns the raw encoded directory name (e.g., `-Users-trevor-Projects-foo`).
+/// We intentionally do NOT decode the path because Claude's encoding is lossy:
+/// hyphens in original path names become indistinguishable from path separators.
+///
 /// Returns `None` if the path is not under the projects directory or
 /// if the projects directory cannot be determined.
 pub fn extract_project_from_path(path: &Path) -> Option<String> {
@@ -75,8 +79,5 @@ pub fn extract_project_from_path(path: &Path) -> Option<String> {
     path.strip_prefix(&projects_dir)
         .ok()
         .and_then(|rel| rel.components().next())
-        .map(|comp| {
-            let encoded = comp.as_os_str().to_string_lossy();
-            config::decode_project_path(&encoded)
-        })
+        .map(|comp| comp.as_os_str().to_string_lossy().to_string())
 }

@@ -327,6 +327,11 @@ fn resolve_project_filter(project: Option<&str>) -> Option<String> {
 
 /// Searches the database and prints results to stdout.
 pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
+    // Validate query is not empty
+    if query.trim().is_empty() {
+        anyhow::bail!("Search query cannot be empty");
+    }
+
     let db_path = config::database_path()?;
     if !db_path.exists() {
         return Err(Error::DatabaseNotFound { path: db_path }.into());
@@ -416,10 +421,7 @@ fn print_result_header(
     show_session_id: bool,
     show_scores: bool,
 ) {
-    let project_display = result.project.as_ref().map_or("unknown", |p| {
-        // Show just the last path component
-        p.rsplit('/').next().unwrap_or(p)
-    });
+    let project_display = project_name(result.project.as_deref());
 
     let label = result.display_label();
     let time_display = format_relative_time(result.timestamp.as_deref());
@@ -454,10 +456,7 @@ fn print_result_header(
 
 /// Prints a compact single-line search result.
 fn print_result_compact(num: usize, result: &SearchResult, show_scores: bool) {
-    let project_display = result
-        .project
-        .as_ref()
-        .map_or("unknown", |p| p.rsplit('/').next().unwrap_or(p));
+    let project_display = project_name(result.project.as_deref());
 
     let label = result.display_label();
     let time_display = format_relative_time(result.timestamp.as_deref());
@@ -611,8 +610,7 @@ pub fn projects() -> Result<()> {
     println!("{}", "─".repeat(50));
 
     for (project, doc_count, last_activity) in &projects {
-        // Show just the last path component as the display name
-        let display_name = project.rsplit('/').next().unwrap_or(project);
+        let display_name = project_name(Some(project.as_str()));
         let time_display = format_relative_time(last_activity.as_deref());
 
         // Pad the name for alignment
@@ -651,9 +649,7 @@ pub fn session(session_id: &str, json: bool, limit: Option<usize>, summary: bool
     if matches.len() > 1 {
         println!("Multiple sessions match '{session_id}':\n");
         for (id, count, project) in &matches {
-            let project_display = project
-                .as_ref()
-                .map_or("unknown", |p| p.rsplit('/').next().unwrap_or(p));
+            let project_display = project_name(project.as_deref());
             println!("  {id} ({count} items) - {project_display}");
         }
         println!("\nSpecify a more complete session ID.");
@@ -687,9 +683,7 @@ pub fn session(session_id: &str, json: bool, limit: Option<usize>, summary: bool
     }
 
     // Human-readable output
-    let project_display = project
-        .as_ref()
-        .map_or("unknown", |p| p.rsplit('/').next().unwrap_or(p));
+    let project_display = project_name(project.as_deref());
 
     let display_count = limit.unwrap_or(messages.len()).min(messages.len());
     let truncated = limit.is_some() && limit.unwrap() < messages.len();
@@ -725,7 +719,7 @@ pub fn session(session_id: &str, json: bool, limit: Option<usize>, summary: bool
 fn print_session_summary(session_id: &str, project: Option<&str>, messages: &[SearchResult]) {
     use std::collections::HashMap;
 
-    let project_display = project.map_or("unknown", |p| p.rsplit('/').next().unwrap_or(p));
+    let project_display = project_name(project);
 
     // Count by chunk kind
     let mut kind_counts: HashMap<&str, usize> = HashMap::new();
@@ -828,6 +822,14 @@ type RankedSession = (String, f64, Option<String>, Option<String>, String);
 /// Aggregated session score during related session computation.
 type SessionScoreEntry = (f64, usize, Option<String>, Option<String>, String);
 
+/// Minimum raw similarity score to include in related sessions.
+/// Sessions below this threshold are considered unrelated.
+const RELATED_MIN_RAW_SCORE: f64 = 0.1;
+
+/// Minimum normalized score to display (after min-max normalization).
+/// Filters out results that are far below the best match.
+const RELATED_MIN_NORMALIZED_SCORE: f64 = 0.05;
+
 /// Finds sessions related to a given session using embedding similarity.
 pub fn related(session_id: &str, limit: usize) -> Result<()> {
     use crate::db::EMBEDDING_DIM;
@@ -858,8 +860,12 @@ pub fn related(session_id: &str, limit: usize) -> Result<()> {
         return Ok(());
     };
 
-    // Find and rank related sessions
-    let mut ranked = find_related_sessions(&db, &avg_embedding, &full_session_id, limit)?;
+    // Find and rank related sessions (fetch extra to allow for filtering)
+    let mut ranked = find_related_sessions(&db, &avg_embedding, &full_session_id, limit * 2)?;
+
+    // Filter out sessions with very low raw similarity
+    ranked.retain(|(_id, score, _proj, _ts, _sample)| *score >= RELATED_MIN_RAW_SCORE);
+
     if ranked.is_empty() {
         println!("No related sessions found.");
         return Ok(());
@@ -867,6 +873,15 @@ pub fn related(session_id: &str, limit: usize) -> Result<()> {
 
     // Normalize scores to 0-1 range
     normalize_ranked_sessions(&mut ranked);
+
+    // Filter out sessions with very low normalized scores (far from best match)
+    ranked.retain(|(_id, score, _proj, _ts, _sample)| *score >= RELATED_MIN_NORMALIZED_SCORE);
+    ranked.truncate(limit);
+
+    if ranked.is_empty() {
+        println!("No related sessions found.");
+        return Ok(());
+    }
 
     print_related_sessions(&ranked);
     Ok(())
@@ -991,9 +1006,50 @@ fn print_related_sessions(sessions: &[RankedSession]) {
     }
 }
 
-/// Extracts just the project name from a full path.
+/// Extracts a display name from an encoded project path.
+///
+/// The encoded path looks like `-Users-trevor-Projects-foo` or `-Users-trevor--claude`.
+/// We extract a reasonable display name by:
+/// 1. Looking for `-Projects-` and taking everything after it
+/// 2. Looking for `--` (hidden dir marker) and taking everything after it
+/// 3. Falling back to the last hyphen-separated segment
 fn project_name(project: Option<&str>) -> &str {
-    project.map_or("unknown", |p| p.rsplit('/').next().unwrap_or(p))
+    let Some(p) = project else {
+        return "unknown";
+    };
+
+    // If it's already a decoded path (for backwards compat), use last segment
+    if p.contains('/') {
+        return p.rsplit('/').next().unwrap_or(p);
+    }
+
+    // Look for -Projects- marker (most common case)
+    if let Some(idx) = p.find("-Projects-") {
+        let after = &p[idx + "-Projects-".len()..];
+        if !after.is_empty() {
+            return after;
+        }
+    }
+
+    // Look for -- marker (hidden directories like .claude)
+    if let Some(idx) = p.rfind("--") {
+        let after = &p[idx + 2..];
+        if !after.is_empty() {
+            return after;
+        }
+    }
+
+    // Fallback: take last segment after final hyphen (if path-like)
+    if p.starts_with('-') {
+        if let Some(idx) = p.rfind('-') {
+            let after = &p[idx + 1..];
+            if !after.is_empty() {
+                return after;
+            }
+        }
+    }
+
+    p
 }
 
 /// Averages a list of embeddings into a single embedding.
