@@ -286,6 +286,9 @@ impl Database {
     #[allow(clippy::cast_possible_wrap)]
     pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let escaped_query = escape_fts_query(query);
+        if escaped_query.is_empty() {
+            return Ok(vec![]);
+        }
         let mut stmt = self.conn.prepare(
             r"
             SELECT d.id, d.chunk_kind, d.content, d.project, d.session_id,
@@ -332,6 +335,9 @@ impl Database {
         errors_only: bool,
     ) -> Result<Vec<SearchResult>> {
         let escaped_query = escape_fts_query(query);
+        if escaped_query.is_empty() {
+            return Ok(vec![]);
+        }
         let mut sql = String::from(
             r"
             SELECT d.id, d.chunk_kind, d.content, d.project, d.session_id,
@@ -833,33 +839,19 @@ fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
     embedding.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
-/// Escapes a query for FTS5 by quoting terms with special characters.
+/// Escapes a query for FTS5 by quoting all terms.
 ///
-/// FTS5 interprets certain characters as operators:
-/// - `-` is treated as column prefix (e.g., `sqlite-vec` becomes `column:value`)
-/// - `:` is the column selector
-/// - `()` are grouping operators
-/// - `*` is a prefix wildcard
-///
-/// This function quotes any term containing these characters to ensure
-/// literal matching.
+/// FTS5 has many special characters (+, -, *, ^, :, ., @, #, $, %, {, }, etc.)
+/// and reserved keywords (AND, OR, NOT, NEAR). Rather than maintaining an
+/// exhaustive list, we quote every term to ensure literal matching.
 fn escape_fts_query(query: &str) -> String {
-    query
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    trimmed
         .split_whitespace()
-        .map(|term| {
-            // Quote terms with FTS5 special chars
-            if term.contains('-')
-                || term.contains(':')
-                || term.contains('(')
-                || term.contains(')')
-                || term.contains('*')
-            {
-                // Escape any existing quotes by doubling them
-                format!("\"{}\"", term.replace('"', "\"\""))
-            } else {
-                term.to_string()
-            }
-        })
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -1023,5 +1015,56 @@ mod tests {
         // "b" appears in both, should have highest score
         assert_eq!(fused[0].id, "b");
         assert!(fused[0].score > fused[1].score);
+    }
+
+    #[test]
+    fn test_escape_fts_special_chars() {
+        // Characters that broke FTS5 before this fix
+        assert_eq!(escape_fts_query("C++"), r#""C++""#);
+        assert_eq!(escape_fts_query("node.js"), r#""node.js""#);
+        assert_eq!(escape_fts_query("@user"), r#""@user""#);
+        assert_eq!(escape_fts_query("file#section"), r#""file#section""#);
+        assert_eq!(escape_fts_query("100%"), r#""100%""#);
+        assert_eq!(escape_fts_query("$HOME"), r#""$HOME""#);
+        assert_eq!(escape_fts_query("foo{bar}"), r#""foo{bar}""#);
+    }
+
+    #[test]
+    fn test_escape_fts_keywords() {
+        // Reserved keywords should be quoted
+        assert_eq!(escape_fts_query("OR"), r#""OR""#);
+        assert_eq!(escape_fts_query("AND"), r#""AND""#);
+        assert_eq!(escape_fts_query("NOT"), r#""NOT""#);
+        assert_eq!(escape_fts_query("NEAR"), r#""NEAR""#);
+    }
+
+    #[test]
+    fn test_escape_fts_empty_and_whitespace() {
+        assert_eq!(escape_fts_query(""), "");
+        assert_eq!(escape_fts_query("   "), "");
+        assert_eq!(escape_fts_query("\t\n"), "");
+    }
+
+    #[test]
+    fn test_escape_fts_multiple_terms() {
+        assert_eq!(escape_fts_query("hello world"), r#""hello" "world""#);
+        assert_eq!(escape_fts_query("C++ AND rust"), r#""C++" "AND" "rust""#);
+    }
+
+    #[test]
+    fn test_escape_fts_embedded_quotes() {
+        // Input: say "hi" -> terms: ["say", "\"hi\""]
+        // "hi" has quotes, so: replace " with "" -> ""hi"", then wrap -> """hi"""
+        assert_eq!(escape_fts_query(r#"say "hi""#), r#""say" """hi""""#);
+        // Input: "test" -> single term with quotes on both sides
+        assert_eq!(escape_fts_query(r#""test""#), r#""""test""""#);
+    }
+
+    #[test]
+    fn test_escape_fts_already_safe() {
+        // These already worked but should still be quoted for consistency
+        assert_eq!(escape_fts_query("sqlite-vec"), r#""sqlite-vec""#);
+        assert_eq!(escape_fts_query("foo:bar"), r#""foo:bar""#);
+        assert_eq!(escape_fts_query("(test)"), r#""(test)""#);
     }
 }

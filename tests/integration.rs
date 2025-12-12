@@ -353,3 +353,124 @@ fn test_filtered_search() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].is_error, Some(true));
 }
+
+#[test]
+fn test_fts_special_characters() {
+    let env = TestEnv::new();
+    let db_path = env.index_dir.join("test_special.db");
+
+    let docs = vec![
+        Document::new(
+            ChunkKind::Message,
+            "Learning C++ programming".to_string(),
+            PathBuf::from("/test/1.jsonl"),
+        ),
+        Document::new(
+            ChunkKind::Message,
+            "Install node.js and npm".to_string(),
+            PathBuf::from("/test/2.jsonl"),
+        ),
+        Document::new(
+            ChunkKind::Message,
+            "Set $HOME variable".to_string(),
+            PathBuf::from("/test/3.jsonl"),
+        ),
+        Document::new(
+            ChunkKind::Message,
+            "Email user@example.com for help".to_string(),
+            PathBuf::from("/test/4.jsonl"),
+        ),
+        Document::new(
+            ChunkKind::Message,
+            "Use foo{bar} syntax".to_string(),
+            PathBuf::from("/test/5.jsonl"),
+        ),
+    ];
+
+    let mut db = Database::open(&db_path).expect("Failed to create database");
+    db.insert_documents(&docs).expect("Failed to insert");
+
+    // These should not crash - they all broke before the fix
+    let results = db.search_fts("C++", 10).expect("C++ search failed");
+    assert_eq!(results.len(), 1);
+    assert!(results[0].content.contains("C++"));
+
+    let results = db.search_fts("node.js", 10).expect("node.js search failed");
+    assert_eq!(results.len(), 1);
+
+    let results = db.search_fts("$HOME", 10).expect("$HOME search failed");
+    assert_eq!(results.len(), 1);
+
+    let results = db
+        .search_fts("user@example.com", 10)
+        .expect("@ search failed");
+    assert_eq!(results.len(), 1);
+
+    let results = db.search_fts("foo{bar}", 10).expect("{} search failed");
+    assert_eq!(results.len(), 1);
+}
+
+#[test]
+fn test_fts_reserved_keywords() {
+    let env = TestEnv::new();
+    let db_path = env.index_dir.join("test_keywords.db");
+
+    let docs = vec![
+        Document::new(
+            ChunkKind::Message,
+            "Use OR for alternatives".to_string(),
+            PathBuf::from("/test/1.jsonl"),
+        ),
+        Document::new(
+            ChunkKind::Message,
+            "Use AND for both conditions".to_string(),
+            PathBuf::from("/test/2.jsonl"),
+        ),
+        Document::new(
+            ChunkKind::Message,
+            "NOT is a negation operator".to_string(),
+            PathBuf::from("/test/3.jsonl"),
+        ),
+    ];
+
+    let mut db = Database::open(&db_path).expect("Failed to create database");
+    db.insert_documents(&docs).expect("Failed to insert");
+
+    // Searching for literal keywords should not crash
+    let results = db.search_fts("OR", 10).expect("OR search failed");
+    assert!(!results.is_empty());
+
+    let results = db.search_fts("AND", 10).expect("AND search failed");
+    assert!(!results.is_empty());
+
+    let results = db.search_fts("NOT", 10).expect("NOT search failed");
+    assert!(!results.is_empty());
+}
+
+#[test]
+fn test_fts_empty_query() {
+    let env = TestEnv::new();
+    let db_path = env.index_dir.join("test_empty_query.db");
+
+    let docs = vec![Document::new(
+        ChunkKind::Message,
+        "Some content here".to_string(),
+        PathBuf::from("/test/1.jsonl"),
+    )];
+
+    let mut db = Database::open(&db_path).expect("Failed to create database");
+    db.insert_documents(&docs).expect("Failed to insert");
+
+    // Empty queries should return empty results, not crash
+    let results = db.search_fts("", 10).expect("Empty search failed");
+    assert!(results.is_empty());
+
+    let results = db.search_fts("   ", 10).expect("Whitespace search failed");
+    assert!(results.is_empty());
+
+    // Filtered search too
+    let results = db
+        .search_fts_filtered("", 10, None, None, false)
+        .expect("Empty filtered search failed");
+    assert!(results.is_empty());
+}
