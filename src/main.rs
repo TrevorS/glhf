@@ -154,6 +154,34 @@ EXAMPLES:
         /// Only show results since a given time (e.g., 1h, 2d, 1w, or 2024-12-01)
         #[arg(long = "since", value_name = "DURATION", value_parser = parse_since)]
         since: Option<DateTime<Utc>>,
+
+        /// Exclude projects by name (repeatable)
+        #[arg(short = 'X', long = "exclude-project", value_name = "NAME")]
+        exclude_projects: Vec<String>,
+
+        /// Exclude results from current project (default when CLAUDECODE=1)
+        #[arg(long = "exclude-this-project")]
+        exclude_this_project: bool,
+
+        /// Include results from current project (overrides default exclusion)
+        #[arg(long = "include-this-project", conflicts_with = "exclude_this_project")]
+        include_this_project: bool,
+
+        /// Exclude results from current session (default when CLAUDECODE=1)
+        #[arg(long = "exclude-this-session")]
+        exclude_this_session: bool,
+
+        /// Include results from current session (overrides default exclusion)
+        #[arg(long = "include-this-session", conflicts_with = "exclude_this_session")]
+        include_this_session: bool,
+
+        /// Filter to current session only
+        #[arg(long = "this-session", conflicts_with_all = ["exclude_this_session", "include_this_session"])]
+        this_session: bool,
+
+        /// Show oldest results first
+        #[arg(long = "oldest", alias = "reverse")]
+        oldest_first: bool,
     },
 
     /// Show index status and statistics
@@ -200,6 +228,23 @@ EXAMPLES:
         #[arg(short, long, default_value = "5")]
         limit: usize,
     },
+
+    /// Show recent sessions
+    #[command(after_help = "\
+EXAMPLES:
+    glhf recent                          Show 10 most recent sessions
+    glhf recent -l 20                    Show 20 most recent sessions
+    glhf recent -p myproject             Filter by project name
+")]
+    Recent {
+        /// Number of sessions to show
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+
+        /// Filter by project name (substring match)
+        #[arg(short, long)]
+        project: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -231,6 +276,13 @@ fn main() -> Result<()> {
             show_session_id,
             scores,
             since,
+            exclude_projects,
+            exclude_this_project,
+            include_this_project,
+            exclude_this_session,
+            include_this_session,
+            this_session,
+            oldest_first,
         } => {
             let options = SearchOptions {
                 limit,
@@ -249,6 +301,13 @@ fn main() -> Result<()> {
                 show_session_id,
                 since,
                 show_scores: scores,
+                exclude_projects,
+                exclude_this_project,
+                include_this_project,
+                exclude_this_session,
+                include_this_session,
+                this_session,
+                oldest_first,
             };
             glhf::commands::search(&query, &options)?;
         }
@@ -268,6 +327,9 @@ fn main() -> Result<()> {
         }
         Commands::Related { session_id, limit } => {
             glhf::commands::related(&session_id, limit)?;
+        }
+        Commands::Recent { limit, project } => {
+            glhf::commands::recent(limit, project.as_deref())?;
         }
     }
 

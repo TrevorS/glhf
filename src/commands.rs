@@ -124,6 +124,20 @@ pub struct SearchOptions {
     pub since: Option<DateTime<Utc>>,
     /// Show relevance scores in output.
     pub show_scores: bool,
+    /// Projects to exclude from results.
+    pub exclude_projects: Vec<String>,
+    /// Exclude current project from results.
+    pub exclude_this_project: bool,
+    /// Include current project (overrides default exclusion).
+    pub include_this_project: bool,
+    /// Exclude current session from results.
+    pub exclude_this_session: bool,
+    /// Include current session (overrides default exclusion).
+    pub include_this_session: bool,
+    /// Filter to current session only.
+    pub this_session: bool,
+    /// Show oldest results first.
+    pub oldest_first: bool,
 }
 
 /// Builds or rebuilds the search index from all conversation files.
@@ -183,10 +197,12 @@ pub fn index(_rebuild: bool, skip_embeddings: bool) -> Result<()> {
         )?;
         println!();
 
-        // Insert embeddings
+        // Insert embeddings (deduplicate by ID since content-hash IDs may repeat)
+        let mut seen = std::collections::HashSet::new();
         let embedding_pairs: Vec<_> = documents
             .iter()
             .zip(embeddings.iter())
+            .filter(|(d, _)| seen.insert(d.id.clone()))
             .map(|(d, e)| (d.id.as_str(), e.as_slice()))
             .collect();
         db.insert_embeddings(&embedding_pairs)?;
@@ -228,6 +244,7 @@ fn get_effective_mode(db: &Database, mode: SearchMode) -> Result<SearchMode> {
 }
 
 /// Executes a search with the given mode and returns results.
+#[allow(clippy::too_many_arguments)]
 fn execute_search(
     db: &Database,
     query: &str,
@@ -236,23 +253,40 @@ fn execute_search(
     chunk_kind: Option<ChunkKind>,
     has_filters: bool,
     resolved_project: Option<&str>,
+    current_project: Option<&str>,
+    current_session: Option<&str>,
 ) -> Result<Vec<SearchResult>> {
     // Determine if we have filters that can be pushed to SQL
     let has_sql_filters = chunk_kind.is_some() || options.tool.is_some() || options.errors;
 
     let results = match mode {
         SearchMode::Text => {
-            if has_filters {
+            let mut results = if has_sql_filters {
                 db.search_fts_filtered(
                     query,
-                    options.limit,
+                    options.limit * 2, // Fetch more for post-filtering
                     chunk_kind,
                     options.tool.as_deref(),
                     options.errors,
                 )?
             } else {
-                db.search_fts(query, options.limit)?
+                db.search_fts(query, options.limit * 2)?
+            };
+
+            // Post-filter for options not in SQL (project, session, exclude)
+            if has_filters {
+                results.retain(|r| {
+                    filter_result(
+                        r,
+                        options,
+                        resolved_project,
+                        current_project,
+                        current_session,
+                    )
+                });
+                results.truncate(options.limit);
             }
+            results
         }
         SearchMode::Semantic | SearchMode::Hybrid => {
             let embedder = Embedder::new().context("Failed to initialize embedder")?;
@@ -263,7 +297,7 @@ fn execute_search(
                 if mode == SearchMode::Semantic {
                     db.search_vector_filtered(
                         &query_embedding,
-                        options.limit,
+                        options.limit * 2,
                         chunk_kind,
                         options.tool.as_deref(),
                         options.errors,
@@ -272,21 +306,29 @@ fn execute_search(
                     db.search_hybrid_filtered(
                         query,
                         &query_embedding,
-                        options.limit,
+                        options.limit * 2,
                         chunk_kind,
                         options.tool.as_deref(),
                         options.errors,
                     )?
                 }
             } else if mode == SearchMode::Semantic {
-                db.search_vector(&query_embedding, options.limit)?
+                db.search_vector(&query_embedding, options.limit * 2)?
             } else {
-                db.search_hybrid(query, &query_embedding, options.limit)?
+                db.search_hybrid(query, &query_embedding, options.limit * 2)?
             };
 
-            // Still need to filter project and since (not in DB methods)
-            if options.project.is_some() || options.since.is_some() {
-                results.retain(|r| filter_result(r, options, resolved_project));
+            // Post-filter for options not in SQL (project, session, exclude)
+            if has_filters {
+                results.retain(|r| {
+                    filter_result(
+                        r,
+                        options,
+                        resolved_project,
+                        current_project,
+                        current_session,
+                    )
+                });
                 results.truncate(options.limit);
             }
             results
@@ -326,6 +368,7 @@ fn resolve_project_filter(project: Option<&str>) -> Option<String> {
 }
 
 /// Searches the database and prints results to stdout.
+#[allow(clippy::too_many_lines)]
 pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
     // Validate query is not empty
     if query.trim().is_empty() {
@@ -340,6 +383,35 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
     let db = Database::open(&db_path).context("Failed to open database")?;
     let chunk_kind = options.messages_only.then_some(ChunkKind::Message);
 
+    // Check if running inside Claude Code
+    let in_claude_code = std::env::var("CLAUDECODE").is_ok();
+
+    // Apply default exclusions when running inside Claude Code
+    let mut options = options.clone();
+    let mut showed_exclusion_hint = false;
+    if in_claude_code && !options.include_this_project && !options.include_this_session {
+        // Auto-exclude current project and session unless overridden
+        if !options.exclude_this_project && !options.include_this_project {
+            options.exclude_this_project = true;
+            showed_exclusion_hint = true;
+        }
+        if !options.exclude_this_session && !options.include_this_session && !options.this_session {
+            options.exclude_this_session = true;
+        }
+    }
+
+    // Detect current project and session when needed
+    let current_project = if options.exclude_this_project {
+        current_project_name()
+    } else {
+        None
+    };
+    let current_session = if options.exclude_this_session || options.this_session {
+        detect_current_session()
+    } else {
+        None
+    };
+
     // Resolve `-p .` to current working directory
     let resolved_project = resolve_project_filter(options.project.as_deref());
     let has_filters = options.tool.is_some()
@@ -347,12 +419,24 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         || options.errors
         || options.messages_only
         || options.tools_only
-        || options.since.is_some();
+        || options.since.is_some()
+        || !options.exclude_projects.is_empty()
+        || options.exclude_this_project
+        || options.exclude_this_session
+        || options.this_session;
 
     let mut results = if options.regex {
         let mut results = db.search_regex(query, options.limit * 2, options.ignore_case)?;
         if has_filters {
-            results.retain(|r| filter_result(r, options, resolved_project.as_deref()));
+            results.retain(|r| {
+                filter_result(
+                    r,
+                    &options,
+                    resolved_project.as_deref(),
+                    current_project.as_deref(),
+                    current_session.as_deref(),
+                )
+            });
         }
         results.truncate(options.limit);
         results
@@ -361,13 +445,20 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         execute_search(
             &db,
             query,
-            options,
+            &options,
             effective_mode,
             chunk_kind,
             has_filters,
             resolved_project.as_deref(),
+            current_project.as_deref(),
+            current_session.as_deref(),
         )?
     };
+
+    // Reverse results for oldest-first ordering
+    if options.oldest_first {
+        results.reverse();
+    }
 
     // Normalize scores to 0-1 range for consistent display
     normalize_scores(&mut results);
@@ -402,7 +493,7 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         } else {
             print_result_header(i + 1, result, options.show_session_id, options.show_scores);
             if show_context {
-                print_result_with_context(result, options, &session_messages);
+                print_result_with_context(result, &options, &session_messages);
             } else {
                 println!(
                     "    \"{}\"\n",
@@ -410,6 +501,12 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
                 );
             }
         }
+    }
+
+    // Show hint about auto-exclusion when running in Claude Code
+    if showed_exclusion_hint {
+        println!("\nTip: Results from this project/session are auto-excluded.");
+        println!("Use --include-this-project or --include-this-session to include them.");
     }
     Ok(())
 }
@@ -1006,6 +1103,42 @@ fn print_related_sessions(sessions: &[RankedSession]) {
     }
 }
 
+/// Shows recent sessions across all projects.
+pub fn recent(limit: usize, project_filter: Option<&str>) -> Result<()> {
+    let db_path = config::database_path()?;
+    if !db_path.exists() {
+        return Err(Error::DatabaseNotFound { path: db_path }.into());
+    }
+
+    let db = Database::open(&db_path).context("Failed to open database")?;
+    let sessions = db.get_recent_sessions(limit, project_filter)?;
+
+    if sessions.is_empty() {
+        if let Some(filter) = project_filter {
+            println!("No sessions found for project: {filter}");
+        } else {
+            println!("No sessions found. Run `glhf index` first.");
+        }
+        return Ok(());
+    }
+
+    println!("Recent Sessions ({} total)", sessions.len());
+    println!("{}", "─".repeat(60));
+
+    for session in &sessions {
+        let proj_display = project_name(Some(&session.project));
+        let time = format_relative_time(Some(&session.last_activity));
+        let short_id = &session.session_id[..8.min(session.session_id.len())];
+
+        println!(
+            "{:<20} {:>6} msgs  {:>10}  {}",
+            proj_display, session.message_count, time, short_id
+        );
+    }
+
+    Ok(())
+}
+
 /// Extracts a display name from an encoded project path.
 ///
 /// The encoded path looks like `-Users-trevor-Projects-foo` or `-Users-trevor--claude`.
@@ -1024,7 +1157,8 @@ fn project_name(project: Option<&str>) -> &str {
     }
 
     // Look for -Projects- marker (most common case)
-    if let Some(idx) = p.find("-Projects-") {
+    // Use rfind to handle edge case of multiple -Projects- in path
+    if let Some(idx) = p.rfind("-Projects-") {
         let after = &p[idx + "-Projects-".len()..];
         if !after.is_empty() {
             return after;
@@ -1050,6 +1184,62 @@ fn project_name(project: Option<&str>) -> &str {
     }
 
     p
+}
+
+/// Returns the current project name based on the working directory.
+fn current_project_name() -> Option<String> {
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
+}
+
+/// Detects the current Claude Code session ID.
+///
+/// Uses two-tier detection:
+/// 1. Primary: Check `CLAUDE_SESSION_ID` env var (user can set via `SessionStart` hook)
+/// 2. Fallback: Find most recently modified non-agent JSONL in project directory
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
+fn detect_current_session() -> Option<String> {
+    // Primary: Check env var (set by user's SessionStart hook)
+    if let Ok(session_id) = std::env::var("CLAUDE_SESSION_ID") {
+        if !session_id.is_empty() {
+            return Some(session_id);
+        }
+    }
+
+    // Fallback: Most recently modified session file in current project
+    let project_dir = current_project_dir()?;
+    std::fs::read_dir(project_dir)
+        .ok()?
+        .filter_map(std::result::Result::ok)
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.ends_with(".jsonl") && !name.starts_with("agent-")
+        })
+        .filter_map(|e| {
+            let modified = e.metadata().ok()?.modified().ok()?;
+            Some((e, modified))
+        })
+        .max_by_key(|(_, modified)| *modified)
+        .map(|(e, _)| {
+            e.file_name()
+                .to_string_lossy()
+                .trim_end_matches(".jsonl")
+                .to_string()
+        })
+}
+
+/// Returns the Claude projects directory for the current working directory.
+fn current_project_dir() -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let encoded = encode_project_path(&cwd);
+    let projects_dir = config::projects_dir().ok()?;
+    Some(projects_dir.join(encoded))
+}
+
+/// Encodes a path the way Claude Code does: `/` -> `-`, `/.` -> `--`
+fn encode_project_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace("/.", "--").replace('/', "-")
 }
 
 /// Averages a list of embeddings into a single embedding.
@@ -1098,11 +1288,14 @@ fn print_session_message(msg: &SearchResult) {
 /// Filters a search result based on options.
 ///
 /// The `resolved_project` parameter is the project filter after resolving `.`
-/// to the current working directory.
+/// to the current working directory. The `current_project` and `current_session`
+/// are lazily computed by the caller when needed.
 fn filter_result(
     result: &SearchResult,
     options: &SearchOptions,
     resolved_project: Option<&str>,
+    current_project: Option<&str>,
+    current_session: Option<&str>,
 ) -> bool {
     // Filter by messages_only
     if options.messages_only && result.chunk_kind != "message" {
@@ -1128,6 +1321,50 @@ fn filter_result(
         match &result.project {
             Some(project) if project.to_lowercase().contains(&filter_lower) => {}
             _ => return false,
+        }
+    }
+
+    // Exclude specific projects
+    if !options.exclude_projects.is_empty() {
+        let result_project = project_name(result.project.as_deref());
+        for excluded in &options.exclude_projects {
+            if result_project
+                .to_lowercase()
+                .contains(&excluded.to_lowercase())
+            {
+                return false;
+            }
+        }
+    }
+
+    // Exclude current project
+    if options.exclude_this_project {
+        if let Some(cur_proj) = current_project {
+            let result_project = project_name(result.project.as_deref());
+            if result_project.eq_ignore_ascii_case(cur_proj) {
+                return false;
+            }
+        }
+    }
+
+    // Filter to current session only
+    if options.this_session {
+        if let Some(cur_sess) = current_session {
+            match &result.session_id {
+                Some(sess) if sess.starts_with(cur_sess) || cur_sess.starts_with(sess) => {}
+                _ => return false,
+            }
+        }
+    }
+
+    // Exclude current session
+    if options.exclude_this_session {
+        if let Some(cur_sess) = current_session {
+            if let Some(ref sess) = result.session_id {
+                if sess.starts_with(cur_sess) || cur_sess.starts_with(sess) {
+                    return false;
+                }
+            }
         }
     }
 

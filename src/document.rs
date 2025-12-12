@@ -300,12 +300,18 @@ impl DisplayLabel for Document {
     }
 }
 
-/// Generates a unique ID using UUID v4.
+/// Generates a deterministic ID based on source path and content.
 ///
-/// Note: The parameters are kept for API compatibility but not used.
-/// Each document gets a unique ID regardless of content.
-fn generate_id(_source_path: &Path, _content: &str) -> String {
-    uuid::Uuid::new_v4().to_string()
+/// Uses SHA-256 hash of the source path and content to ensure:
+/// - Same document always gets the same ID (idempotent indexing)
+/// - Different documents get different IDs (collision-resistant)
+/// - Re-indexing won't create duplicates
+fn generate_id(source_path: &Path, content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(source_path.to_string_lossy().as_bytes());
+    hasher.update(content.as_bytes());
+    hex::encode(hasher.finalize())[..32].to_string()
 }
 
 #[cfg(test)]
@@ -313,15 +319,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_generate_id_unique() {
+    fn test_generate_id_deterministic() {
         let path = PathBuf::from("/test/path.jsonl");
         let content = "test content";
         let id1 = generate_id(&path, content);
         let id2 = generate_id(&path, content);
-        // IDs should be unique even for identical inputs (UUID v4)
+        // Same input should produce same ID (deterministic)
+        assert_eq!(id1, id2);
+        assert_eq!(id1.len(), 32); // First 32 chars of hex-encoded SHA-256
+    }
+
+    #[test]
+    fn test_generate_id_different_for_different_content() {
+        let path = PathBuf::from("/test/path.jsonl");
+        let id1 = generate_id(&path, "content1");
+        let id2 = generate_id(&path, "content2");
+        // Different content should produce different IDs
         assert_ne!(id1, id2);
-        assert_eq!(id1.len(), 36); // UUID format: 8-4-4-4-12
-        assert_eq!(id2.len(), 36);
+    }
+
+    #[test]
+    fn test_generate_id_different_for_different_paths() {
+        let content = "same content";
+        let id1 = generate_id(&PathBuf::from("/path1.jsonl"), content);
+        let id2 = generate_id(&PathBuf::from("/path2.jsonl"), content);
+        // Different paths should produce different IDs
+        assert_ne!(id1, id2);
     }
 
     #[test]

@@ -67,6 +67,15 @@ impl DisplayLabel for SearchResult {
     }
 }
 
+/// Summary of a session for the `recent` command.
+#[derive(Debug, Clone)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub project: String,
+    pub message_count: usize,
+    pub last_activity: String,
+}
+
 /// `SQLite` database with FTS5 and vector search capabilities.
 pub struct Database {
     conn: Connection,
@@ -253,7 +262,7 @@ impl Database {
         let tx = self.conn.transaction()?;
         {
             let mut stmt =
-                tx.prepare("INSERT INTO documents_vec (id, embedding) VALUES (?1, ?2)")?;
+                tx.prepare("INSERT OR REPLACE INTO documents_vec (id, embedding) VALUES (?1, ?2)")?;
 
             for (doc_id, embedding) in embeddings {
                 let embedding_bytes = embedding_to_bytes(embedding);
@@ -283,12 +292,31 @@ impl Database {
     }
 
     /// Full-text search using FTS5.
+    ///
+    /// Uses implicit AND by default, but falls back to OR for multi-word
+    /// queries that return no results. This helps with common phrases like
+    /// "how to" that might not appear together in indexed content.
     #[allow(clippy::cast_possible_wrap)]
     pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let escaped_query = escape_fts_query(query);
         if escaped_query.is_empty() {
             return Ok(vec![]);
         }
+
+        let results = self.execute_fts_query(&escaped_query, limit)?;
+
+        // If AND returns no results and query has multiple words, try OR
+        if results.is_empty() && query.split_whitespace().count() > 1 {
+            let or_query = escape_fts_query_or(query);
+            return self.execute_fts_query(&or_query, limit);
+        }
+
+        Ok(results)
+    }
+
+    /// Execute an FTS5 query and return results.
+    #[allow(clippy::cast_possible_wrap)]
+    fn execute_fts_query(&self, escaped_query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let mut stmt = self.conn.prepare(
             r"
             SELECT d.id, d.chunk_kind, d.content, d.project, d.session_id,
@@ -736,6 +764,66 @@ impl Database {
         Ok(results)
     }
 
+    /// Gets recent sessions, optionally filtered by project.
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap
+    )]
+    pub fn get_recent_sessions(
+        &self,
+        limit: usize,
+        project: Option<&str>,
+    ) -> Result<Vec<SessionSummary>> {
+        let sql = if project.is_some() {
+            r"
+            SELECT session_id, project, COUNT(*) as msg_count, MAX(timestamp) as last_activity
+            FROM documents
+            WHERE session_id IS NOT NULL
+              AND project IS NOT NULL
+              AND LOWER(project) LIKE '%' || LOWER(?1) || '%'
+            GROUP BY session_id
+            ORDER BY last_activity DESC
+            LIMIT ?2
+            "
+        } else {
+            r"
+            SELECT session_id, project, COUNT(*) as msg_count, MAX(timestamp) as last_activity
+            FROM documents
+            WHERE session_id IS NOT NULL
+            GROUP BY session_id
+            ORDER BY last_activity DESC
+            LIMIT ?1
+            "
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
+
+        let results = if let Some(proj) = project {
+            stmt.query_map(params![proj, limit as i64], |row| {
+                Ok(SessionSummary {
+                    session_id: row.get(0)?,
+                    project: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    message_count: row.get::<_, i64>(2)?.max(0) as usize,
+                    last_activity: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map(params![limit as i64], |row| {
+                Ok(SessionSummary {
+                    session_id: row.get(0)?,
+                    project: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    message_count: row.get::<_, i64>(2)?.max(0) as usize,
+                    last_activity: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        Ok(results)
+    }
+
     /// Gets document IDs for a session (for embedding lookup).
     pub fn get_session_doc_ids(&self, session_id: &str) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
@@ -857,6 +945,16 @@ fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
 /// and reserved keywords (AND, OR, NOT, NEAR). Rather than maintaining an
 /// exhaustive list, we quote every term to ensure literal matching.
 fn escape_fts_query(query: &str) -> String {
+    escape_fts_query_with_operator(query, " ")
+}
+
+/// Escape FTS query joining terms with OR for fallback searches.
+fn escape_fts_query_or(query: &str) -> String {
+    escape_fts_query_with_operator(query, " OR ")
+}
+
+/// Internal helper to escape FTS query with configurable operator.
+fn escape_fts_query_with_operator(query: &str, operator: &str) -> String {
     let trimmed = query.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -865,7 +963,7 @@ fn escape_fts_query(query: &str) -> String {
         .split_whitespace()
         .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(operator)
 }
 
 /// Computes FTS weight for hybrid search based on query length.
@@ -1088,6 +1186,16 @@ mod tests {
     fn test_escape_fts_multiple_terms() {
         assert_eq!(escape_fts_query("hello world"), r#""hello" "world""#);
         assert_eq!(escape_fts_query("C++ AND rust"), r#""C++" "AND" "rust""#);
+    }
+
+    #[test]
+    fn test_escape_fts_or_multiple_terms() {
+        // OR version joins with " OR " for fallback searches
+        assert_eq!(escape_fts_query_or("hello world"), r#""hello" OR "world""#);
+        assert_eq!(
+            escape_fts_query_or("how to fix"),
+            r#""how" OR "to" OR "fix""#
+        );
     }
 
     #[test]
