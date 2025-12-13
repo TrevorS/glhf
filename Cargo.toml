@@ -13,9 +13,13 @@ categories = ["command-line-utilities"]
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
+comfy-table = "7"
+console = "0.15"
 dirs = "6"
 hex = "0.4.3"
+indicatif = "0.17"
 model2vec-rs = "0.1"
+owo-colors = "4"
 regex = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

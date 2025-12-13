@@ -6,11 +6,12 @@ use crate::document::{ChunkKind, DisplayLabel};
 use crate::embed::Embedder;
 use crate::error::Error;
 use crate::ingest;
+use crate::style::{components, icons::Icons, theme};
 use crate::utils::truncate_text;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
-use std::io::Write;
 use std::time::Instant;
 
 /// Batch size for embedding generation (optimized for GPU efficiency).
@@ -148,36 +149,70 @@ pub fn index(skip_embeddings: bool) -> Result<()> {
         std::fs::remove_file(&db_path)?;
     }
 
-    println!("Discovering conversation files...");
+    // Create a spinner for the discovery phase
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .unwrap(),
+    );
+    spinner.set_message("Discovering conversation files...");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
     let start = Instant::now();
 
     // Ingest all documents
     let documents = ingest::ingest_all().context("Failed to ingest documents")?;
     let doc_count = documents.len();
+    spinner.finish_and_clear();
 
     if doc_count == 0 {
-        println!("No documents found to index.");
+        println!("{} No documents found to index.", Icons::database());
         return Ok(());
     }
 
-    println!("Found {doc_count} documents. Building database...");
+    // Database indexing progress
+    let pb = ProgressBar::new(doc_count as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.cyan} {msg} [{bar:30.cyan/dim}] {pos}/{len}")
+            .unwrap()
+            .progress_chars("█▓░"),
+    );
+    pb.set_message("Building database");
 
     // Create database and insert documents
     let mut db = Database::open(&db_path)?;
     db.insert_documents(&documents)?;
+    pb.set_position(doc_count as u64);
+    pb.finish_and_clear();
 
     let db_time = start.elapsed();
     println!(
-        "Indexed {} documents in {:.2}s",
-        doc_count,
+        "{} Indexed {} documents in {:.2}s",
+        theme::success(Icons::check()),
+        theme::bold(&doc_count.to_string()),
         db_time.as_secs_f64()
     );
 
     // Generate embeddings unless skipped
     if skip_embeddings {
-        println!("Skipping embeddings (text search only mode).");
+        println!(
+            "{} Skipping embeddings (text search only mode)",
+            theme::dim(Icons::arrow())
+        );
     } else {
-        println!("\nGenerating embeddings (this may take a while on first run)...");
+        println!();
+        let embed_pb = ProgressBar::new(doc_count as u64);
+        embed_pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.magenta} {msg} [{bar:30.magenta/dim}] {pos}/{len} ({eta})")
+                .unwrap()
+                .progress_chars("█▓░"),
+        );
+        embed_pb.set_message("Generating embeddings");
+        embed_pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
         let embed_start = Instant::now();
 
         let embedder = Embedder::new().context("Failed to initialize embedder")?;
@@ -189,12 +224,11 @@ pub fn index(skip_embeddings: bool) -> Result<()> {
         let embeddings = embedder.embed_documents_with_progress(
             &contents,
             EMBEDDING_BATCH_SIZE,
-            |done, total| {
-                print!("\rEmbedding: {done}/{total} documents");
-                std::io::stdout().flush().ok();
+            |done, _total| {
+                embed_pb.set_position(done as u64);
             },
         )?;
-        println!();
+        embed_pb.finish_and_clear();
 
         // Insert embeddings (deduplicate by ID since content-hash IDs may repeat)
         let mut seen = std::collections::HashSet::new();
@@ -208,16 +242,28 @@ pub fn index(skip_embeddings: bool) -> Result<()> {
 
         let embed_time = embed_start.elapsed();
         println!(
-            "Generated {} embeddings in {:.2}s",
-            embeddings.len(),
+            "{} Generated {} embeddings in {:.2}s",
+            theme::success(Icons::check()),
+            theme::bold(&embeddings.len().to_string()),
             embed_time.as_secs_f64()
         );
     }
 
     // Show database size
     let size = db.file_size().unwrap_or(0);
-    println!("\nDatabase size: {}", format_size(size));
-    println!("Location: {}", db_path.display());
+    println!();
+    println!(
+        "{}",
+        components::header_box(&format!("{} Index Complete", Icons::database()))
+    );
+    println!();
+    println!(
+        "  {} {}",
+        theme::dim("Size:"),
+        theme::bold(&format_size(size))
+    );
+    println!("  {} {}", theme::dim("Location:"), db_path.display());
+    println!();
 
     Ok(())
 }
@@ -474,7 +520,11 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
 
     // Human-readable output
     if results.is_empty() {
-        println!("No matches found for: {query}");
+        println!(
+            "{} No matches found for: {}",
+            Icons::search(),
+            theme::bold(query)
+        );
         return Ok(());
     }
 
@@ -485,7 +535,25 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         HashMap::new()
     };
 
-    println!("Found {} results:\n", results.len());
+    // Print header
+    if options.compact {
+        println!(
+            "{} Found {} results:\n",
+            Icons::search(),
+            theme::bold(&results.len().to_string())
+        );
+    } else {
+        println!(
+            "{}",
+            components::header_box(&format!(
+                "{} Found {} results",
+                Icons::search(),
+                results.len()
+            ))
+        );
+        println!();
+    }
+
     for (i, result) in results.iter().enumerate() {
         if options.compact {
             print_result_compact(i + 1, result, options.show_scores);
@@ -495,64 +563,97 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
                 print_result_with_context(result, &options, &session_messages);
             } else {
                 println!(
-                    "    \"{}\"\n",
-                    truncate_text(&result.content, RESULT_SNIPPET_LEN)
+                    "{}",
+                    components::content_box(
+                        &truncate_text(&result.content, RESULT_SNIPPET_LEN),
+                        70
+                    )
                 );
+                println!();
             }
         }
     }
 
     // Show hint about auto-exclusion when running in Claude Code
     if showed_exclusion_hint {
-        println!("\nTip: Results from this project/session are auto-excluded.");
-        println!("Use --include-this-project or --include-this-session to include them.");
+        println!();
+        println!(
+            "{} Results from this project/session are auto-excluded.",
+            theme::dim("Tip:")
+        );
+        println!(
+            "     Use {} or {} to include them.",
+            theme::bold("--include-this-project"),
+            theme::bold("--include-this-session")
+        );
     }
     Ok(())
 }
 
 /// Prints the header for a search result.
 fn print_result_header(
-    num: usize,
+    _num: usize,
     result: &SearchResult,
     show_session_id: bool,
     show_scores: bool,
 ) {
     let project_display = project_name(result.project.as_deref());
+    let is_error = result.is_error.unwrap_or(false);
+    let icon = Icons::for_chunk(&result.chunk_kind, is_error);
 
     let label = result.display_label();
     let time_display = format_relative_time(result.timestamp.as_deref());
+
+    let styled_project = theme::style_project(project_display);
+    let styled_label = match result.chunk_kind.as_str() {
+        "tool_use" => theme::style_tool(&label),
+        "tool_result" if is_error => theme::style_error(&label),
+        "tool_result" => theme::success(&label),
+        "message" => {
+            if let Some(ref role) = result.role {
+                theme::style_role(role, &label)
+            } else {
+                label.clone()
+            }
+        }
+        _ => label.clone(),
+    };
+    let styled_time = theme::style_time(&time_display);
+
     let score_display = if show_scores {
-        format!(" | Score: {:.2}", result.score)
+        format!(" {} {}", theme::dim("|"), theme::style_score(result.score))
     } else {
         String::new()
     };
 
-    if show_session_id {
-        let session_display = result
+    let session_display = if show_session_id {
+        let sess = result
             .session_id
             .as_ref()
             .map_or("unknown", |s| &s[..s.len().min(8)]);
-        println!(
-            "[{}] {} | {} | {} | {}{} | sess:{}",
-            num,
-            result.chunk_kind,
-            project_display,
-            label,
-            time_display,
-            score_display,
-            session_display
-        );
+        format!("  {}", theme::style_session(&format!("sess:{sess}")))
     } else {
-        println!(
-            "[{}] {} | {} | {} | {}{}",
-            num, result.chunk_kind, project_display, label, time_display, score_display
-        );
-    }
+        String::new()
+    };
+
+    println!(
+        "  {} {} {} {} {} {}{}{}",
+        icon,
+        styled_project,
+        theme::dim("·"),
+        styled_label,
+        theme::dim("·"),
+        styled_time,
+        score_display,
+        session_display
+    );
 }
 
 /// Prints a compact single-line search result.
 fn print_result_compact(num: usize, result: &SearchResult, show_scores: bool) {
     let project_display = project_name(result.project.as_deref());
+    let is_error = result.is_error.unwrap_or(false);
+    let icon = Icons::for_chunk(&result.chunk_kind, is_error);
 
     let label = result.display_label();
     let time_display = format_relative_time(result.timestamp.as_deref());
@@ -562,14 +663,42 @@ fn print_result_compact(num: usize, result: &SearchResult, show_scores: bool) {
         .map_or("--------", |s| &s[..s.len().min(8)]);
     let snippet = truncate_text(&result.content, 60);
 
+    // Compact format: icon [num] project | label | time | session | "snippet"
+    let styled_project = theme::style_project(project_display);
+    let styled_label = match result.chunk_kind.as_str() {
+        "tool_use" => theme::style_tool(&label),
+        "tool_result" if is_error => theme::style_error(&label),
+        _ => label.clone(),
+    };
+    let styled_time = theme::style_time(&time_display);
+    let styled_session = theme::style_session(session_display);
+
     if show_scores {
         println!(
-            "[{num}] {:.2} | {project_display} | {label} | {time_display} | {session_display} | \"{snippet}\"",
-            result.score
+            "{} {} {} {} {} {} {} {} {} {}",
+            icon,
+            theme::dim(&format!("[{num}]")),
+            theme::style_score(result.score),
+            theme::dim("|"),
+            styled_project,
+            theme::dim("|"),
+            styled_label,
+            theme::dim("|"),
+            styled_time,
+            theme::dim(&format!("| {styled_session} | \"{snippet}\"")),
         );
     } else {
         println!(
-            "[{num}] {project_display} | {label} | {time_display} | {session_display} | \"{snippet}\""
+            "{} {} {} {} {} {} {} {} {}",
+            icon,
+            theme::dim(&format!("[{num}]")),
+            styled_project,
+            theme::dim("|"),
+            styled_label,
+            theme::dim("|"),
+            styled_time,
+            theme::dim("|"),
+            theme::dim(&format!("{styled_session} | \"{snippet}\"")),
         );
     }
 }
@@ -620,15 +749,19 @@ fn print_result_with_context(
     options: &SearchOptions,
     session_messages: &HashMap<String, Vec<SearchResult>>,
 ) {
-    let Some(session_id) = &result.session_id else {
+    let fallback_display = || {
         let snippet = truncate_text(&result.content, RESULT_SNIPPET_LEN);
-        println!("    \"{snippet}\"\n");
+        println!("{}", components::content_box(&snippet, 70));
+        println!();
+    };
+
+    let Some(session_id) = &result.session_id else {
+        fallback_display();
         return;
     };
 
     let Some(session_msgs) = session_messages.get(session_id) else {
-        let snippet = truncate_text(&result.content, RESULT_SNIPPET_LEN);
-        println!("    \"{snippet}\"\n");
+        fallback_display();
         return;
     };
 
@@ -636,8 +769,7 @@ fn print_result_with_context(
     let match_pos = session_msgs.iter().position(|m| m.id == result.id);
 
     let Some(pos) = match_pos else {
-        let snippet = truncate_text(&result.content, RESULT_SNIPPET_LEN);
-        println!("    \"{snippet}\"\n");
+        fallback_display();
         return;
     };
 
@@ -645,15 +777,51 @@ fn print_result_with_context(
     let start = pos.saturating_sub(options.before);
     let end = (pos + 1 + options.after).min(session_msgs.len());
 
-    // Print context messages
+    // Print context messages in a styled block
+    println!();
     for (idx, msg) in session_msgs[start..end].iter().enumerate() {
         let absolute_idx = start + idx;
         let is_match = absolute_idx == pos;
-        let prefix = if is_match { ">>>" } else { "   " };
+        let prefix = if is_match {
+            Icons::match_prefix()
+        } else {
+            Icons::context_prefix()
+        };
         let label = msg.display_label();
+        let is_error = msg.is_error.unwrap_or(false);
+        let icon = Icons::for_chunk(&msg.chunk_kind, is_error);
+
+        let styled_label = match msg.chunk_kind.as_str() {
+            "tool_use" => theme::style_tool(&label),
+            "tool_result" if is_error => theme::style_error(&label),
+            "message" => {
+                if let Some(ref role) = msg.role {
+                    theme::style_role(role, &label)
+                } else {
+                    label.clone()
+                }
+            }
+            _ => label.clone(),
+        };
 
         let snippet = truncate_text(&msg.content, CONTEXT_SNIPPET_LEN);
-        println!("{prefix} [{label}] \"{snippet}\"");
+        if is_match {
+            println!(
+                "  {} {} {} \"{}\"",
+                theme::bold(prefix),
+                icon,
+                styled_label,
+                theme::bold(&snippet)
+            );
+        } else {
+            println!(
+                "  {} {} {} \"{}\"",
+                theme::dim(prefix),
+                icon,
+                styled_label,
+                theme::dim(&snippet)
+            );
+        }
     }
     println!();
 }
@@ -663,8 +831,11 @@ pub fn status() -> Result<()> {
     let db_path = config::database_path()?;
 
     if !db_path.exists() {
-        println!("No database found.");
-        println!("Run 'glhf index' to build the search index.");
+        println!("{} No database found.", Icons::database());
+        println!(
+            "   Run {} to build the search index.",
+            theme::bold("glhf index")
+        );
         return Ok(());
     }
 
@@ -673,17 +844,62 @@ pub fn status() -> Result<()> {
     let embedding_count = db.embedding_count()?;
     let size = db.file_size().unwrap_or(0);
 
-    println!("Database Status");
-    println!("---------------");
-    println!("Documents:  {doc_count}");
-    println!("Embeddings: {embedding_count}");
-    println!("Size:       {}", format_size(size));
-    println!("Location:   {}", db_path.display());
+    // Calculate embedding percentage
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let embedding_pct = if doc_count > 0 {
+        ((embedding_count as f64 / doc_count as f64 * 100.0).max(0.0)) as usize
+    } else {
+        0
+    };
+
+    println!(
+        "{}",
+        components::header_box(&format!("{} Database Status", Icons::database()))
+    );
+    println!();
+
+    // Documents with progress bar
+    println!(
+        "  {}   {}  {}",
+        theme::dim("Documents"),
+        components::progress_bar(doc_count, doc_count.max(1), 15),
+        theme::bold(&format!("{doc_count:>8}"))
+    );
+
+    // Embeddings with progress bar
+    println!(
+        "  {}  {}  {} {}",
+        theme::dim("Embeddings"),
+        components::progress_bar(embedding_count, doc_count.max(1), 15),
+        theme::bold(&format!("{embedding_count:>8}")),
+        if doc_count > 0 {
+            theme::dim(&format!("{embedding_pct}%"))
+        } else {
+            String::new()
+        }
+    );
+
+    // Size
+    println!(
+        "  {}        {}  {}",
+        theme::dim("Size"),
+        components::progress_bar(1, 4, 15),
+        theme::bold(&format_size(size))
+    );
+
+    println!();
+    println!("  {} {}", theme::dim("Location:"), db_path.display());
 
     if embedding_count == 0 && doc_count > 0 {
-        println!("\nNote: No embeddings found. Run 'glhf index' to enable semantic search.");
+        println!();
+        println!(
+            "  {} No embeddings found. Run {} to enable semantic search.",
+            theme::warning("Note:"),
+            theme::bold("glhf index")
+        );
     }
 
+    println!();
     Ok(())
 }
 
@@ -698,25 +914,46 @@ pub fn projects() -> Result<()> {
     let projects = db.list_projects()?;
 
     if projects.is_empty() {
-        println!("No projects found.");
+        println!("{} No projects found.", Icons::project());
         return Ok(());
     }
 
-    println!("Projects ({} total)", projects.len());
-    println!("{}", "─".repeat(50));
+    // Find max doc count for progress bar scaling
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let max_docs = projects
+        .iter()
+        .map(|(_, c, _)| (*c).max(0) as usize)
+        .max()
+        .unwrap_or(1);
+
+    println!(
+        "{}",
+        components::header_box(&format!(
+            "{} Projects ({} total)",
+            Icons::project(),
+            projects.len()
+        ))
+    );
+    println!();
 
     for (project, doc_count, last_activity) in &projects {
         let display_name = project_name(Some(project.as_str()));
         let time_display = format_relative_time(last_activity.as_deref());
 
-        // Pad the name for alignment
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let count_usize = (*doc_count).max(0) as usize;
         println!(
-            "{:<20} {:>6} docs    last: {}",
-            truncate_text(display_name, 20),
-            doc_count,
-            time_display
+            "  {}  {}  {} docs   {}",
+            theme::style_project(&components::padded_label(
+                &truncate_text(display_name, 18),
+                18
+            )),
+            components::progress_bar(count_usize, max_docs, 12),
+            components::right_align(&doc_count.to_string(), 5),
+            theme::style_time(&time_display)
         );
     }
+    println!();
 
     Ok(())
 }
@@ -737,18 +974,33 @@ pub fn session(session_id: &str, json: bool, limit: Option<usize>, summary: bool
     let matches = db.find_sessions(session_id)?;
 
     if matches.is_empty() {
-        println!("No sessions found matching: {session_id}");
+        println!(
+            "{} No sessions found matching: {}",
+            Icons::session(),
+            theme::bold(session_id)
+        );
         return Ok(());
     }
 
     // If multiple matches, list them
     if matches.len() > 1 {
-        println!("Multiple sessions match '{session_id}':\n");
+        println!(
+            "{} Multiple sessions match '{}':\n",
+            Icons::session(),
+            theme::bold(session_id)
+        );
         for (id, count, project) in &matches {
             let project_display = project_name(project.as_deref());
-            println!("  {id} ({count} items) - {project_display}");
+            println!(
+                "  {} {} ({} items) {} {}",
+                Icons::arrow(),
+                theme::style_session(id),
+                count,
+                theme::dim("-"),
+                theme::style_project(project_display)
+            );
         }
-        println!("\nSpecify a more complete session ID.");
+        println!("\n  Specify a more complete session ID.");
         return Ok(());
     }
 
@@ -757,7 +1009,11 @@ pub fn session(session_id: &str, json: bool, limit: Option<usize>, summary: bool
     let messages = db.get_session_messages(full_session_id)?;
 
     if messages.is_empty() {
-        println!("Session {full_session_id} has no messages.");
+        println!(
+            "{} Session {} has no messages.",
+            Icons::session(),
+            theme::style_session(full_session_id)
+        );
         return Ok(());
     }
 
@@ -784,26 +1040,40 @@ pub fn session(session_id: &str, json: bool, limit: Option<usize>, summary: bool
     let display_count = limit.unwrap_or(messages.len()).min(messages.len());
     let truncated = limit.is_some() && limit.unwrap() < messages.len();
 
+    let truncate_note = if truncated {
+        format!(" (showing first {display_count})")
+    } else {
+        String::new()
+    };
+
     println!(
-        "Session: {} | {} | {} items{}\n",
-        full_session_id,
-        project_display,
-        messages.len(),
-        if truncated {
-            format!(" (showing first {display_count})")
-        } else {
-            String::new()
-        }
+        "{}",
+        components::header_box(&format!(
+            "{} Session {}",
+            Icons::session(),
+            &full_session_id[..full_session_id.len().min(8)]
+        ))
     );
-    println!("{}", "─".repeat(60));
+    println!(
+        "  {} {} {} {} items{}",
+        Icons::project(),
+        theme::style_project(project_display),
+        theme::dim("·"),
+        messages.len(),
+        theme::dim(&truncate_note)
+    );
+    println!();
+    println!("{}", components::divider(60));
 
     for msg in messages.iter().take(display_count) {
         print_session_message(msg);
     }
 
     if truncated {
+        println!();
         println!(
-            "\n... {} more messages not shown",
+            "  {} {} more messages not shown",
+            theme::dim("..."),
             messages.len() - display_count
         );
     }
@@ -858,40 +1128,76 @@ fn print_session_summary(session_id: &str, project: Option<&str>, messages: &[Se
     };
 
     let started = format_relative_time(first_ts.map(std::string::String::as_str));
+    let short_id = &session_id[..session_id.len().min(8)];
 
-    println!("Session: {session_id}");
-    println!("Project: {project_display}");
-    println!("Duration: {duration} (started {started})");
-    println!("Messages: {} total", messages.len());
+    // Header
+    println!(
+        "{}",
+        components::header_box(&format!("{} Session {}", Icons::session(), short_id))
+    );
+    println!(
+        "  {} {}  {}  {} {}  {} started {}",
+        Icons::project(),
+        theme::style_project(project_display),
+        theme::dim("·"),
+        Icons::time(),
+        theme::bold(&duration),
+        theme::dim("·"),
+        theme::style_time(&started)
+    );
+    println!();
 
-    // Role breakdown
+    // Message breakdown
+    println!("  {} {} total", theme::bold("Messages:"), messages.len());
+    println!();
+
+    // Role breakdown with icons
     if !role_counts.is_empty() {
         let mut roles: Vec<_> = role_counts.into_iter().collect();
         roles.sort_by(|a, b| b.1.cmp(&a.1));
         for (role, count) in roles {
-            println!("  - {role}: {count}");
+            let icon = Icons::for_role(role);
+            let styled = theme::style_role(role, role);
+            println!(
+                "    {} {}: {}",
+                icon,
+                styled,
+                theme::bold(&count.to_string())
+            );
         }
     }
 
     // Tool use breakdown
     if let Some(&tool_use_count) = kind_counts.get("tool_use") {
-        println!("  - tool calls: {tool_use_count}");
+        println!(
+            "    {} {}: {}",
+            Icons::tool(),
+            theme::style_tool("tool calls"),
+            theme::bold(&tool_use_count.to_string())
+        );
     }
     if let Some(&tool_result_count) = kind_counts.get("tool_result") {
-        println!("  - tool results: {tool_result_count}");
+        println!(
+            "    {} {}: {}",
+            Icons::result(),
+            theme::success("tool results"),
+            theme::bold(&tool_result_count.to_string())
+        );
     }
 
     // Top tools
     if !tool_counts.is_empty() {
+        println!();
         let mut tools: Vec<_> = tool_counts.into_iter().collect();
         tools.sort_by(|a, b| b.1.cmp(&a.1));
         let top_tools: Vec<_> = tools
             .iter()
             .take(5)
-            .map(|(t, c)| format!("{t} ({c})"))
+            .map(|(t, c)| format!("{} ({})", theme::style_tool(t), c))
             .collect();
-        println!("Tools used: {}", top_tools.join(", "));
+        println!("  {} {}", theme::bold("Tools:"), top_tools.join(", "));
     }
+    println!();
 }
 
 /// Formats a duration in a human-readable way.
@@ -938,7 +1244,11 @@ pub fn related(session_id: &str, limit: usize) -> Result<()> {
     let db = Database::open(&db_path).context("Failed to open database")?;
 
     if !db.has_embeddings()? {
-        println!("No embeddings found. Run 'glhf index' to enable semantic search.");
+        println!(
+            "{} No embeddings found. Run {} to enable semantic search.",
+            Icons::link(),
+            theme::bold("glhf index")
+        );
         return Ok(());
     }
 
@@ -948,7 +1258,24 @@ pub fn related(session_id: &str, limit: usize) -> Result<()> {
     };
 
     let project_display = project_name(project.as_deref());
-    println!("Finding sessions related to: {full_session_id} ({project_display})\n");
+    let short_id = &full_session_id[..full_session_id.len().min(8)];
+
+    println!(
+        "{}",
+        components::header_box(&format!(
+            "{} Related Sessions to {}",
+            Icons::link(),
+            short_id
+        ))
+    );
+    println!(
+        "  {} {} {} {}",
+        Icons::project(),
+        theme::style_project(project_display),
+        theme::dim("·"),
+        theme::style_session(&full_session_id)
+    );
+    println!();
 
     // Get session embedding
     let Some(avg_embedding) = compute_session_embedding(&db, &full_session_id, EMBEDDING_DIM)?
@@ -963,7 +1290,7 @@ pub fn related(session_id: &str, limit: usize) -> Result<()> {
     ranked.retain(|(_id, score, _proj, _ts, _sample)| *score >= RELATED_MIN_RAW_SCORE);
 
     if ranked.is_empty() {
-        println!("No related sessions found.");
+        println!("  {} No related sessions found.", Icons::search());
         return Ok(());
     }
 
@@ -975,7 +1302,7 @@ pub fn related(session_id: &str, limit: usize) -> Result<()> {
     ranked.truncate(limit);
 
     if ranked.is_empty() {
-        println!("No related sessions found.");
+        println!("  {} No related sessions found.", Icons::search());
         return Ok(());
     }
 
@@ -1084,21 +1411,25 @@ fn find_related_sessions(
 
 /// Prints the list of related sessions.
 fn print_related_sessions(sessions: &[RankedSession]) {
-    println!("Related sessions:\n");
     for (i, (sess_id, score, proj, timestamp, sample)) in sessions.iter().enumerate() {
         let proj_display = project_name(proj.as_deref());
         let time_display = format_relative_time(timestamp.as_deref());
         let snippet = truncate_text(sample, 60);
+        let short_id = &sess_id[..sess_id.len().min(8)];
 
         println!(
-            "[{}] {} | {} | {} | Score: {:.2}",
-            i + 1,
-            &sess_id[..sess_id.len().min(8)],
-            proj_display,
-            time_display,
-            score
+            "  {} {} {} {} {} {} {} {}",
+            components::score_bar(*score, 8),
+            theme::dim(&format!("[{}]", i + 1)),
+            theme::style_session(short_id),
+            theme::dim("|"),
+            theme::style_project(proj_display),
+            theme::dim("|"),
+            theme::style_time(&time_display),
+            theme::dim(&format!("| {:.0}%", score * 100.0))
         );
-        println!("    \"{snippet}\"\n");
+        println!("       {} \"{}\"", Icons::arrow(), theme::dim(&snippet));
+        println!();
     }
 }
 
@@ -1114,15 +1445,31 @@ pub fn recent(limit: usize, project_filter: Option<&str>) -> Result<()> {
 
     if sessions.is_empty() {
         if let Some(filter) = project_filter {
-            println!("No sessions found for project: {filter}");
+            println!(
+                "{} No sessions found for project: {}",
+                Icons::calendar(),
+                theme::bold(filter)
+            );
         } else {
-            println!("No sessions found. Run `glhf index` first.");
+            println!(
+                "{} No sessions found. Run {} first.",
+                Icons::calendar(),
+                theme::bold("glhf index")
+            );
         }
         return Ok(());
     }
 
-    println!("Recent Sessions ({} total)", sessions.len());
-    println!("{}", "─".repeat(60));
+    let title = if let Some(filter) = project_filter {
+        format!("{} Recent Sessions for {}", Icons::calendar(), filter)
+    } else {
+        format!("{} Recent Sessions", Icons::calendar())
+    };
+    println!("{}", components::header_box(&title));
+    println!();
+
+    // Find max message count for progress bar scaling
+    let max_msgs = sessions.iter().map(|s| s.message_count).max().unwrap_or(1);
 
     for session in &sessions {
         let proj_display = project_name(Some(&session.project));
@@ -1130,10 +1477,19 @@ pub fn recent(limit: usize, project_filter: Option<&str>) -> Result<()> {
         let short_id = &session.session_id[..8.min(session.session_id.len())];
 
         println!(
-            "{:<20} {:>6} msgs  {:>10}  {}",
-            proj_display, session.message_count, time, short_id
+            "  {} {}  {} {} msgs  {}  {}",
+            theme::style_project(&components::padded_label(
+                &truncate_text(proj_display, 16),
+                16
+            )),
+            components::progress_bar(session.message_count, max_msgs, 10),
+            components::right_align(&session.message_count.to_string(), 4),
+            theme::dim(""),
+            theme::style_time(&components::padded_label(&time, 10)),
+            theme::style_session(short_id)
         );
     }
+    println!();
 
     Ok(())
 }
@@ -1265,18 +1621,42 @@ fn average_embeddings(embeddings: &[Vec<f32>], dim: usize) -> Vec<f32> {
 fn print_session_message(msg: &SearchResult) {
     let time = format_relative_time(msg.timestamp.as_deref());
     let label = msg.display_label();
+    let is_error = msg.is_error.unwrap_or(false);
+    let icon = Icons::for_chunk(&msg.chunk_kind, is_error);
 
-    // Color/style header based on type
-    let header = format!("[{}] {} | {}", label, msg.chunk_kind, time);
-    println!("\n{header}");
-    println!("{}", "─".repeat(40));
+    // Style header based on type
+    let styled_label = match msg.chunk_kind.as_str() {
+        "tool_use" => theme::style_tool(&label),
+        "tool_result" if is_error => theme::style_error(&label),
+        "tool_result" => theme::success(&label),
+        "message" => {
+            if let Some(ref role) = msg.role {
+                theme::style_role(role, &label)
+            } else {
+                label.clone()
+            }
+        }
+        _ => label.clone(),
+    };
+
+    println!();
+    println!(
+        "{} {} {} {} {} {}",
+        icon,
+        styled_label,
+        theme::dim("|"),
+        theme::style_chunk_kind(&msg.chunk_kind, &msg.chunk_kind),
+        theme::dim("|"),
+        theme::style_time(&time)
+    );
+    println!("{}", components::divider(50));
 
     // Print content (truncate very long content)
     let content = if msg.content.len() > 2000 {
         format!(
-            "{}...\n[truncated, {} total chars]",
+            "{}...\n{}",
             &msg.content[..2000],
-            msg.content.len()
+            theme::dim(&format!("[truncated, {} total chars]", msg.content.len()))
         )
     } else {
         msg.content.clone()
