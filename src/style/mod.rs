@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 static STYLE_CONTEXT: OnceLock<StyleContext> = OnceLock::new();
 
 /// Terminal styling context.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct StyleContext {
     /// Whether colors are enabled.
     pub colors: bool,
@@ -24,11 +24,18 @@ pub struct StyleContext {
     /// Whether output is to a terminal (TTY).
     pub is_tty: bool,
     /// Terminal width (0 if not a terminal).
-    pub width: usize,
+    pub width: u16,
+}
+
+impl Default for StyleContext {
+    fn default() -> Self {
+        Self::detect()
+    }
 }
 
 impl StyleContext {
     /// Detect terminal capabilities and create a style context.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn detect() -> Self {
         let term = Term::stdout();
         let is_tty = term.is_term();
@@ -43,37 +50,13 @@ impl StyleContext {
         let unicode = is_tty && std::env::var("GLHF_ASCII").is_err();
 
         // Get terminal width
-        let width = if is_tty {
-            term.size().1 as usize
-        } else {
-            80 // Default for non-TTY
-        };
+        let width = if is_tty { term.size().1 } else { 80 };
 
         Self {
             colors,
             unicode,
             is_tty,
             width,
-        }
-    }
-
-    /// Force colors on (for testing or --color=always).
-    pub fn force_colors() -> Self {
-        Self {
-            colors: true,
-            unicode: true,
-            is_tty: true,
-            width: 80,
-        }
-    }
-
-    /// Force colors off (for --color=never).
-    pub fn no_colors() -> Self {
-        Self {
-            colors: false,
-            unicode: true,
-            is_tty: false,
-            width: 80,
         }
     }
 }
@@ -83,18 +66,13 @@ pub fn ctx() -> &'static StyleContext {
     STYLE_CONTEXT.get_or_init(StyleContext::detect)
 }
 
-/// Initialize the style context with custom settings.
-/// Must be called before any styling functions if customization is needed.
-pub fn init(context: StyleContext) {
-    let _ = STYLE_CONTEXT.set(context);
-}
-
 /// Check if styled output should be used.
 pub fn should_style() -> bool {
-    ctx().colors && ctx().is_tty
+    let ctx = ctx();
+    ctx.colors && ctx.is_tty
 }
 
 /// Get the terminal width.
 pub fn term_width() -> usize {
-    ctx().width
+    ctx().width as usize
 }
