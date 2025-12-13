@@ -3,121 +3,122 @@
 use super::ctx;
 
 /// Icons for different content types.
+/// Uses minimal, sleek ideograms rather than emoji.
 pub struct Icons;
 
 impl Icons {
     /// User message icon.
     pub fn user() -> &'static str {
         if ctx().unicode {
-            "👤"
+            "◆"
         } else {
-            "[user]"
+            "[u]"
         }
     }
 
     /// Assistant message icon.
     pub fn assistant() -> &'static str {
         if ctx().unicode {
-            "🤖"
+            "◇"
         } else {
-            "[asst]"
+            "[a]"
         }
     }
 
     /// Tool use icon.
     pub fn tool() -> &'static str {
         if ctx().unicode {
-            "🔧"
+            "▸"
         } else {
-            "[tool]"
+            ">"
         }
     }
 
     /// Tool result (success) icon.
     pub fn result() -> &'static str {
         if ctx().unicode {
-            "✅"
+            "✓"
         } else {
-            "[done]"
+            "+"
         }
     }
 
     /// Error icon.
     pub fn error() -> &'static str {
         if ctx().unicode {
-            "❌"
+            "✗"
         } else {
-            "[err]"
+            "x"
         }
     }
 
     /// Project/folder icon.
     pub fn project() -> &'static str {
         if ctx().unicode {
-            "📁"
+            "●"
         } else {
-            "[proj]"
+            "*"
         }
     }
 
     /// Search icon.
     pub fn search() -> &'static str {
         if ctx().unicode {
-            "🔍"
+            "◎"
         } else {
-            "[find]"
+            "?"
         }
     }
 
     /// Database icon.
     pub fn database() -> &'static str {
         if ctx().unicode {
-            "📊"
+            "◉"
         } else {
-            "[db]"
+            "@"
         }
     }
 
     /// Session icon.
     pub fn session() -> &'static str {
         if ctx().unicode {
-            "📋"
+            "▪"
         } else {
-            "[sess]"
+            "#"
         }
     }
 
     /// Time/clock icon.
     pub fn time() -> &'static str {
         if ctx().unicode {
-            "⏱️"
+            "○"
         } else {
-            "[time]"
+            "~"
         }
     }
 
     /// Link/related icon.
     pub fn link() -> &'static str {
         if ctx().unicode {
-            "🔗"
+            "◌"
         } else {
-            "[link]"
+            "~"
         }
     }
 
     /// Calendar/recent icon.
     pub fn calendar() -> &'static str {
         if ctx().unicode {
-            "📅"
+            "▫"
         } else {
-            "[date]"
+            "="
         }
     }
 
     /// Lightning/quick icon.
     pub fn lightning() -> &'static str {
         if ctx().unicode {
-            "⚡"
+            "›"
         } else {
             ">"
         }
@@ -126,9 +127,9 @@ impl Icons {
     /// Message/chat icon.
     pub fn message() -> &'static str {
         if ctx().unicode {
-            "💬"
+            "•"
         } else {
-            "[msg]"
+            "-"
         }
     }
 
@@ -137,7 +138,7 @@ impl Icons {
         if ctx().unicode {
             "✓"
         } else {
-            "[ok]"
+            "+"
         }
     }
 
@@ -153,9 +154,9 @@ impl Icons {
     /// Bullet point.
     pub fn bullet() -> &'static str {
         if ctx().unicode {
-            "•"
+            "·"
         } else {
-            "*"
+            "-"
         }
     }
 
