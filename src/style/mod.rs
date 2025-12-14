@@ -6,6 +6,7 @@
 
 pub mod components;
 pub mod icons;
+pub mod output;
 pub mod theme;
 
 use console::Term;
