@@ -162,14 +162,22 @@ pub fn size(bytes: u64) -> String {
 }
 
 /// Format a relative time string.
+///
+/// Handles RFC3339 timestamps and shows human-friendly relative times.
+/// For timestamps older than 8 weeks, shows the date instead.
 pub fn relative_time(timestamp: Option<&str>) -> String {
     use chrono::{DateTime, Utc};
 
-    let Some(ts) = timestamp else {
+    let Some(ts_str) = timestamp else {
         return "unknown".to_string();
     };
 
-    let Ok(dt) = ts.parse::<DateTime<Utc>>() else {
+    // Try RFC3339 first (handles timezone offsets), then UTC
+    let dt = DateTime::parse_from_rfc3339(ts_str)
+        .map(|t| t.with_timezone(&Utc))
+        .or_else(|_| ts_str.parse::<DateTime<Utc>>());
+
+    let Ok(dt) = dt else {
         return "unknown".to_string();
     };
 
@@ -184,8 +192,9 @@ pub fn relative_time(timestamp: Option<&str>) -> String {
     let mins = duration.num_minutes();
     let hours = duration.num_hours();
     let days = duration.num_days();
+    let weeks = days / 7;
 
-    if mins < 1 {
+    if secs < 60 {
         "just now".to_string()
     } else if mins < 60 {
         format!("{mins}m ago")
@@ -193,9 +202,10 @@ pub fn relative_time(timestamp: Option<&str>) -> String {
         format!("{hours}h ago")
     } else if days < 7 {
         format!("{days}d ago")
-    } else if days < 30 {
-        format!("{}w ago", days / 7)
+    } else if weeks < 8 {
+        format!("{weeks}w ago")
     } else {
-        format!("{}mo ago", days / 30)
+        // Show date for older items
+        dt.format("%b %d").to_string()
     }
 }

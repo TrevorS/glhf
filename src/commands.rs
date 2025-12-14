@@ -6,7 +6,7 @@ use crate::document::{ChunkKind, DisplayLabel};
 use crate::embed::Embedder;
 use crate::error::Error;
 use crate::ingest;
-use crate::style::{components, icons::Icons, theme};
+use crate::style::{components, icons::Icons, output, theme};
 use crate::utils::truncate_text;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -260,7 +260,7 @@ pub fn index(skip_embeddings: bool) -> Result<()> {
     println!(
         "  {} {}",
         theme::dim("Size:"),
-        theme::bold(&format_size(size))
+        theme::bold(&output::size(size))
     );
     println!("  {} {}", theme::dim("Location:"), db_path.display());
     println!();
@@ -602,7 +602,7 @@ fn print_result_header(
     let icon = Icons::for_chunk(&result.chunk_kind, is_error);
 
     let label = result.display_label();
-    let time_display = format_relative_time(result.timestamp.as_deref());
+    let time_display = output::relative_time(result.timestamp.as_deref());
 
     let styled_project = theme::style_project(project_display);
     let styled_label = match result.chunk_kind.as_str() {
@@ -656,7 +656,7 @@ fn print_result_compact(num: usize, result: &SearchResult, show_scores: bool) {
     let icon = Icons::for_chunk(&result.chunk_kind, is_error);
 
     let label = result.display_label();
-    let time_display = format_relative_time(result.timestamp.as_deref());
+    let time_display = output::relative_time(result.timestamp.as_deref());
     let session_display = result
         .session_id
         .as_ref()
@@ -700,46 +700,6 @@ fn print_result_compact(num: usize, result: &SearchResult, show_scores: bool) {
             theme::dim("|"),
             theme::dim(&format!("{styled_session} | \"{snippet}\"")),
         );
-    }
-}
-
-/// Formats a timestamp as relative time (e.g., "2h ago", "3 days ago").
-fn format_relative_time(timestamp: Option<&str>) -> String {
-    let Some(ts_str) = timestamp else {
-        return "unknown".to_string();
-    };
-
-    let Ok(ts) = DateTime::parse_from_rfc3339(ts_str) else {
-        return "unknown".to_string();
-    };
-
-    let now = Utc::now();
-    let ts_utc = ts.with_timezone(&Utc);
-    let duration = now.signed_duration_since(ts_utc);
-
-    let seconds = duration.num_seconds();
-    if seconds < 0 {
-        return "future".to_string();
-    }
-
-    let minutes = duration.num_minutes();
-    let hours = duration.num_hours();
-    let days = duration.num_days();
-    let weeks = days / 7;
-
-    if seconds < 60 {
-        "just now".to_string()
-    } else if minutes < 60 {
-        format!("{minutes}m ago")
-    } else if hours < 24 {
-        format!("{hours}h ago")
-    } else if days < 7 {
-        format!("{days}d ago")
-    } else if weeks < 8 {
-        format!("{weeks}w ago")
-    } else {
-        // Show date for older items
-        ts_utc.format("%b %d").to_string()
     }
 }
 
@@ -884,7 +844,7 @@ pub fn status() -> Result<()> {
         "  {}        {}  {}",
         theme::dim("Size"),
         components::progress_bar(1, 4, 15),
-        theme::bold(&format_size(size))
+        theme::bold(&output::size(size))
     );
 
     println!();
@@ -938,7 +898,7 @@ pub fn projects() -> Result<()> {
 
     for (project, doc_count, last_activity) in &projects {
         let display_name = project_name(Some(project.as_str()));
-        let time_display = format_relative_time(last_activity.as_deref());
+        let time_display = output::relative_time(last_activity.as_deref());
 
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let count_usize = (*doc_count).max(0) as usize;
@@ -1127,7 +1087,7 @@ fn print_session_summary(session_id: &str, project: Option<&str>, messages: &[Se
         _ => "unknown".to_string(),
     };
 
-    let started = format_relative_time(first_ts.map(std::string::String::as_str));
+    let started = output::relative_time(first_ts.map(std::string::String::as_str));
     let short_id = &session_id[..session_id.len().min(8)];
 
     // Header
@@ -1413,7 +1373,7 @@ fn find_related_sessions(
 fn print_related_sessions(sessions: &[RankedSession]) {
     for (i, (sess_id, score, proj, timestamp, sample)) in sessions.iter().enumerate() {
         let proj_display = project_name(proj.as_deref());
-        let time_display = format_relative_time(timestamp.as_deref());
+        let time_display = output::relative_time(timestamp.as_deref());
         let snippet = truncate_text(sample, 60);
         let short_id = &sess_id[..sess_id.len().min(8)];
 
@@ -1473,7 +1433,7 @@ pub fn recent(limit: usize, project_filter: Option<&str>) -> Result<()> {
 
     for session in &sessions {
         let proj_display = project_name(Some(&session.project));
-        let time = format_relative_time(Some(&session.last_activity));
+        let time = output::relative_time(Some(&session.last_activity));
         let short_id = &session.session_id[..8.min(session.session_id.len())];
 
         println!(
@@ -1619,7 +1579,7 @@ fn average_embeddings(embeddings: &[Vec<f32>], dim: usize) -> Vec<f32> {
 
 /// Prints a single message in session view format.
 fn print_session_message(msg: &SearchResult) {
-    let time = format_relative_time(msg.timestamp.as_deref());
+    let time = output::relative_time(msg.timestamp.as_deref());
     let label = msg.display_label();
     let is_error = msg.is_error.unwrap_or(false);
     let icon = Icons::for_chunk(&msg.chunk_kind, is_error);
@@ -1765,21 +1725,4 @@ fn filter_result(
     }
 
     true
-}
-
-/// Format bytes as human-readable size.
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
 }
