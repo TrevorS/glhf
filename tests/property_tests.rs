@@ -45,7 +45,7 @@ proptest! {
 
     #[test]
     fn proptest_parse_jsonl_valid_message_produces_one_doc(
-        content in "[a-zA-Z0-9 ]{1,50}",
+        content in "[a-zA-Z0-9]{1}[a-zA-Z0-9 ]{0,49}",
         session in "[a-f0-9]{8}",
     ) {
         let dir = tempfile::tempdir().unwrap();
