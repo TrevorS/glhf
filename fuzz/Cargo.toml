@@ -1,0 +1,38 @@
+[package]
+name = "glhf-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.glhf]
+path = ".."
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_fts_escape"
+path = "fuzz_targets/fuzz_fts_escape.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_parse_jsonl"
+path = "fuzz_targets/fuzz_parse_jsonl.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_truncate"
+path = "fuzz_targets/fuzz_truncate.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_decode_path"
+path = "fuzz_targets/fuzz_decode_path.rs"
+doc = false

@@ -10,8 +10,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Once;
 
-/// Embedding dimension for Potion-multilingual-128M model.
-pub const EMBEDDING_DIM: usize = 256;
+/// Embedding dimension for Potion-retrieval-32M model.
+pub const EMBEDDING_DIM: usize = 512;
 
 /// Ensures sqlite-vec is registered only once per process.
 static SQLITE_VEC_INIT: Once = Once::new();
@@ -98,8 +98,8 @@ impl Database {
         Ok(db)
     }
 
-    /// Creates a new in-memory database (for testing).
-    #[cfg(test)]
+    /// Creates a new in-memory database (for testing and fuzzing).
+    #[cfg(any(test, fuzzing))]
     pub fn open_in_memory() -> Result<Self> {
         // Initialize sqlite-vec extension (once per process)
         init_sqlite_vec();
@@ -954,8 +954,15 @@ fn escape_fts_query_or(query: &str) -> String {
 }
 
 /// Internal helper to escape FTS query with configurable operator.
+///
+/// Strips null bytes and other control characters that FTS5 cannot handle.
 fn escape_fts_query_with_operator(query: &str, operator: &str) -> String {
-    let trimmed = query.trim();
+    // Strip null bytes and control characters that FTS5 can't handle
+    let cleaned: String = query
+        .chars()
+        .filter(|c| !c.is_control() || *c == ' ')
+        .collect();
+    let trimmed = cleaned.trim();
     if trimmed.is_empty() {
         return String::new();
     }
@@ -1213,5 +1220,167 @@ mod tests {
         assert_eq!(escape_fts_query("sqlite-vec"), r#""sqlite-vec""#);
         assert_eq!(escape_fts_query("foo:bar"), r#""foo:bar""#);
         assert_eq!(escape_fts_query("(test)"), r#""(test)""#);
+    }
+
+    // --- Property tests ---
+
+    use proptest::prelude::*;
+
+    fn arb_search_result(id: &str, score: f64) -> SearchResult {
+        SearchResult {
+            id: id.to_string(),
+            score,
+            chunk_kind: "message".to_string(),
+            content: format!("content for {id}"),
+            project: None,
+            session_id: None,
+            role: None,
+            tool_name: None,
+            tool_id: None,
+            tool_input: None,
+            is_error: None,
+            timestamp: None,
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_escape_fts_never_unbalanced_quotes(query in ".*") {
+            let escaped = escape_fts_query_with_operator(&query, " ");
+            let quote_count = escaped.chars().filter(|&c| c == '"').count();
+            prop_assert!(quote_count % 2 == 0, "Unbalanced quotes in: {}", escaped);
+        }
+
+        #[test]
+        fn proptest_escape_fts_empty_whitespace_gives_empty(query in "\\s*") {
+            let escaped = escape_fts_query_with_operator(&query, " ");
+            prop_assert_eq!(escaped, "");
+        }
+
+        #[test]
+        fn proptest_escape_fts_never_errors_in_db(query in ".{1,100}") {
+            let db = Database::open_in_memory().unwrap();
+            // Insert a document so FTS table isn't empty
+            let doc = Document::new(
+                ChunkKind::Message,
+                "test content for property testing".to_string(),
+                PathBuf::from("/test"),
+            );
+            db.insert_document(&doc).unwrap();
+
+            // The search should never return an error (may return empty results)
+            let result = db.search_fts(&query, 10);
+            prop_assert!(result.is_ok(), "search_fts errored on query: {query:?}");
+        }
+
+        #[test]
+        fn proptest_compute_fts_weight_valid_values(query in ".*") {
+            let weight = compute_fts_weight(&query);
+            prop_assert!(
+                (weight - 1.0).abs() < f64::EPSILON
+                    || (weight - 1.5).abs() < f64::EPSILON
+                    || (weight - 2.5).abs() < f64::EPSILON,
+                "Unexpected weight: {weight}"
+            );
+        }
+
+        #[test]
+        fn proptest_compute_fts_weight_monotonic(short in ".{0,14}", long in ".{31,60}") {
+            let w_short = compute_fts_weight(&short);
+            let w_long = compute_fts_weight(&long);
+            prop_assert!(w_short >= w_long, "Short query weight {w_short} < long query weight {w_long}");
+        }
+
+        #[test]
+        fn proptest_embedding_roundtrip(values in prop::collection::vec(-1.0f32..1.0f32, 0..100)) {
+            let bytes = embedding_to_bytes(&values);
+            let recovered = bytes_to_embedding(&bytes);
+            prop_assert_eq!(values.len(), recovered.len());
+            for (orig, rec) in values.iter().zip(recovered.iter()) {
+                prop_assert_eq!(orig.to_bits(), rec.to_bits());
+            }
+        }
+
+        #[test]
+        fn proptest_bytes_roundtrip(bytes in prop::collection::vec(0u8..=255u8, 0..400usize).prop_filter(
+            "length must be multiple of 4",
+            |v| v.len() % 4 == 0
+        )) {
+            let embedding = bytes_to_embedding(&bytes);
+            let recovered_bytes = embedding_to_bytes(&embedding);
+            prop_assert_eq!(bytes, recovered_bytes);
+        }
+
+        #[test]
+        fn proptest_rrf_fusion_no_duplicates(
+            n_fts in 0..20usize,
+            n_vec in 0..20usize,
+            limit in 1..30usize,
+        ) {
+            let fts_results: Vec<SearchResult> = (0..n_fts)
+                .map(|i| arb_search_result(&format!("fts-{i}"), 10.0 - i as f64))
+                .collect();
+            let vec_results: Vec<SearchResult> = (0..n_vec)
+                .map(|i| arb_search_result(&format!("vec-{i}"), 0.9 - i as f64 * 0.01))
+                .collect();
+
+            let fused = rrf_fusion_weighted(&fts_results, &vec_results, limit, 1.0);
+
+            // No duplicate IDs
+            let mut seen = std::collections::HashSet::new();
+            for r in &fused {
+                prop_assert!(seen.insert(&r.id), "Duplicate ID: {}", r.id);
+            }
+        }
+
+        #[test]
+        fn proptest_rrf_fusion_length_bounded(
+            n_fts in 0..20usize,
+            n_vec in 0..20usize,
+            limit in 1..30usize,
+        ) {
+            let fts_results: Vec<SearchResult> = (0..n_fts)
+                .map(|i| arb_search_result(&format!("fts-{i}"), 10.0 - i as f64))
+                .collect();
+            let vec_results: Vec<SearchResult> = (0..n_vec)
+                .map(|i| arb_search_result(&format!("vec-{i}"), 0.9 - i as f64 * 0.01))
+                .collect();
+
+            let fused = rrf_fusion_weighted(&fts_results, &vec_results, limit, 1.0);
+
+            // Count unique IDs across both input lists
+            let mut all_ids = std::collections::HashSet::new();
+            for r in &fts_results { all_ids.insert(&r.id); }
+            for r in &vec_results { all_ids.insert(&r.id); }
+
+            prop_assert!(fused.len() <= limit);
+            prop_assert!(fused.len() <= all_ids.len());
+        }
+
+        #[test]
+        fn proptest_rrf_fusion_scores_non_increasing(
+            n_fts in 1..15usize,
+            n_vec in 1..15usize,
+            limit in 1..30usize,
+            fts_weight in 0.5..3.0f64,
+        ) {
+            let fts_results: Vec<SearchResult> = (0..n_fts)
+                .map(|i| arb_search_result(&format!("fts-{i}"), 10.0 - i as f64))
+                .collect();
+            let vec_results: Vec<SearchResult> = (0..n_vec)
+                .map(|i| arb_search_result(&format!("vec-{i}"), 0.9 - i as f64 * 0.01))
+                .collect();
+
+            let fused = rrf_fusion_weighted(&fts_results, &vec_results, limit, fts_weight);
+
+            for window in fused.windows(2) {
+                prop_assert!(
+                    window[0].score >= window[1].score,
+                    "Scores not non-increasing: {} < {}",
+                    window[0].score,
+                    window[1].score
+                );
+            }
+        }
     }
 }

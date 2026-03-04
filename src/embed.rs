@@ -1,13 +1,13 @@
 //! Embeddings generation using model2vec.
 //!
 //! This module provides a wrapper around model2vec for generating text embeddings
-//! using the Potion-multilingual-128M model (256 dimensions).
+//! using the Potion-retrieval-32M model (512 dimensions).
 
 use crate::error::Error;
 use crate::Result;
 use model2vec_rs::model::StaticModel;
 
-const MODEL_ID: &str = "minishlab/potion-multilingual-128M";
+const MODEL_ID: &str = "minishlab/potion-retrieval-32M";
 
 /// Wrapper around model2vec for generating text embeddings.
 pub struct Embedder {
@@ -15,7 +15,7 @@ pub struct Embedder {
 }
 
 impl Embedder {
-    /// Creates a new embedder with Potion-multilingual-128M.
+    /// Creates a new embedder with Potion-retrieval-32M.
     ///
     /// This will download the model on first use.
     pub fn new() -> Result<Self> {
@@ -92,7 +92,7 @@ mod tests {
     fn test_embed_query() {
         let embedder = Embedder::new().unwrap();
         let embedding = embedder.embed_query("hello world").unwrap();
-        assert_eq!(embedding.len(), 256);
+        assert_eq!(embedding.len(), 512);
     }
 
     #[test]
@@ -102,8 +102,8 @@ mod tests {
         let docs = vec!["hello world".to_string(), "goodbye world".to_string()];
         let embeddings = embedder.embed_documents(&docs).unwrap();
         assert_eq!(embeddings.len(), 2);
-        assert_eq!(embeddings[0].len(), 256);
-        assert_eq!(embeddings[1].len(), 256);
+        assert_eq!(embeddings[0].len(), 512);
+        assert_eq!(embeddings[1].len(), 512);
     }
 
     #[test]

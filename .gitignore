@@ -16,3 +16,11 @@
 
 # Benchmark artifacts
 /target/criterion
+
+# Fuzz artifacts
+fuzz/corpus/
+fuzz/artifacts/
+
+# Proptest regression files
+**/proptest-regressions/
+*.proptest-regressions

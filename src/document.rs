@@ -459,4 +459,90 @@ mod tests {
         assert!(tool.is_tool_use());
         assert!(!tool.is_tool_result());
     }
+
+    // --- Property tests ---
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn proptest_generate_id_deterministic(
+            path in "[a-z/]{1,50}",
+            content in ".*"
+        ) {
+            let path = PathBuf::from(&path);
+            let id1 = generate_id(&path, &content);
+            let id2 = generate_id(&path, &content);
+            prop_assert_eq!(&id1, &id2);
+        }
+
+        #[test]
+        fn proptest_generate_id_length_always_32(
+            path in ".*",
+            content in ".*"
+        ) {
+            let id = generate_id(&PathBuf::from(&path), &content);
+            prop_assert_eq!(id.len(), 32);
+        }
+
+        #[test]
+        fn proptest_generate_id_all_hex(
+            path in ".*",
+            content in ".*"
+        ) {
+            let id = generate_id(&PathBuf::from(&path), &content);
+            prop_assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+
+        #[test]
+        fn proptest_snippet_length_bounded(
+            content in ".{1,500}",
+            max_chars in 1..500usize
+        ) {
+            let doc = Document::new(
+                ChunkKind::Message,
+                content,
+                PathBuf::from("/test"),
+            );
+            let snippet = doc.snippet(max_chars);
+            prop_assert!(snippet.chars().count() <= max_chars);
+        }
+
+        #[test]
+        fn proptest_snippet_max_returns_full_content(content in ".{0,200}") {
+            let doc = Document::new(
+                ChunkKind::Message,
+                content.clone(),
+                PathBuf::from("/test"),
+            );
+            let snippet = doc.snippet(usize::MAX);
+            prop_assert_eq!(snippet, content.as_str());
+        }
+
+        #[test]
+        fn proptest_snippet_valid_utf8(content in "\\PC{0,200}", max_chars in 0..100usize) {
+            let doc = Document::new(
+                ChunkKind::Message,
+                content,
+                PathBuf::from("/test"),
+            );
+            let snippet = doc.snippet(max_chars);
+            // snippet is &str, so it's always valid UTF-8
+            prop_assert!(std::str::from_utf8(snippet.as_bytes()).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_chunk_kind_roundtrip_exhaustive() {
+        let kinds = [
+            ChunkKind::Message,
+            ChunkKind::ToolUse,
+            ChunkKind::ToolResult,
+        ];
+        for kind in &kinds {
+            let s = kind.as_str();
+            let parsed = ChunkKind::parse(s);
+            assert_eq!(parsed, Some(*kind), "Roundtrip failed for {kind:?}");
+        }
+    }
 }

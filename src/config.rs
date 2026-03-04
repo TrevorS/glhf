@@ -91,6 +91,7 @@ pub fn decode_project_path(encoded: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_decode_project_path() {
@@ -112,5 +113,35 @@ mod tests {
     #[test]
     fn test_decode_project_path_no_dashes() {
         assert_eq!(decode_project_path("simple"), "simple");
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_decode_never_panics(input in ".*") {
+            let _ = decode_project_path(&input);
+        }
+
+        #[test]
+        fn proptest_decode_leading_dash_becomes_slash(s in "[a-zA-Z0-9]{1,20}") {
+            let encoded = format!("-{s}");
+            let decoded = decode_project_path(&encoded);
+            prop_assert!(decoded.starts_with('/'));
+        }
+
+        #[test]
+        fn proptest_decode_no_dashes_unchanged(s in "[a-zA-Z0-9_.]{0,50}") {
+            // Input without dashes should pass through unchanged
+            let decoded = decode_project_path(&s);
+            prop_assert_eq!(decoded, s);
+        }
+
+        #[test]
+        fn proptest_decode_output_never_contains_single_dash(s in "-[a-zA-Z]{1,5}(-[a-zA-Z]{1,5}){0,5}") {
+            // All single dashes become '/', so output should have no dashes
+            // (only if input has no double-dashes and no literal dashes in segments)
+            let decoded = decode_project_path(&s);
+            // Output should have slashes where dashes were
+            prop_assert!(!decoded.contains('-'));
+        }
     }
 }

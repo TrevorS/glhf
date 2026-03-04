@@ -1403,3 +1403,113 @@ fn format_size(bytes: u64) -> String {
         format!("{bytes} B")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::SearchResult;
+    use proptest::prelude::*;
+
+    fn make_result(id: &str, score: f64) -> SearchResult {
+        SearchResult {
+            id: id.to_string(),
+            score,
+            chunk_kind: "message".to_string(),
+            content: format!("content {id}"),
+            project: None,
+            session_id: None,
+            role: None,
+            tool_name: None,
+            tool_id: None,
+            tool_input: None,
+            is_error: None,
+            timestamp: None,
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_normalize_scores_in_range(
+            scores in prop::collection::vec(0.0f64..1000.0, 2..50)
+        ) {
+            let mut results: Vec<SearchResult> = scores
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| make_result(&format!("r{i}"), s))
+                .collect();
+            normalize_scores(&mut results);
+            for r in &results {
+                prop_assert!(r.score >= 0.0 && r.score <= 1.0,
+                    "Score out of range: {}", r.score);
+            }
+        }
+
+        #[test]
+        fn proptest_normalize_scores_max_is_one(
+            scores in prop::collection::vec(0.0f64..1000.0, 2..50)
+                .prop_filter("need distinct values", |v| {
+                    let min = v.iter().copied().fold(f64::INFINITY, f64::min);
+                    let max = v.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                    (max - min).abs() > f64::EPSILON
+                })
+        ) {
+            let mut results: Vec<SearchResult> = scores
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| make_result(&format!("r{i}"), s))
+                .collect();
+            normalize_scores(&mut results);
+            let max_score = results.iter().map(|r| r.score).fold(f64::NEG_INFINITY, f64::max);
+            prop_assert!((max_score - 1.0).abs() < f64::EPSILON,
+                "Max score should be 1.0, got {max_score}");
+        }
+
+        #[test]
+        fn proptest_normalize_scores_preserves_ordering(
+            scores in prop::collection::vec(0.0f64..1000.0, 2..50)
+        ) {
+            let mut results: Vec<SearchResult> = scores
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| make_result(&format!("r{i}"), s))
+                .collect();
+
+            // Record original ordering of pairs
+            let original_scores: Vec<f64> = results.iter().map(|r| r.score).collect();
+            normalize_scores(&mut results);
+
+            // For every pair, relative ordering should be preserved
+            for i in 0..results.len() {
+                for j in (i + 1)..results.len() {
+                    if original_scores[i] > original_scores[j] {
+                        prop_assert!(results[i].score >= results[j].score);
+                    } else if original_scores[i] < original_scores[j] {
+                        prop_assert!(results[i].score <= results[j].score);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn proptest_normalize_scores_all_same(
+            score in 0.0f64..1000.0,
+            count in 1..20usize,
+        ) {
+            let mut results: Vec<SearchResult> = (0..count)
+                .map(|i| make_result(&format!("r{i}"), score))
+                .collect();
+            normalize_scores(&mut results);
+            for r in &results {
+                prop_assert!((r.score - 1.0).abs() < f64::EPSILON,
+                    "All-same scores should normalize to 1.0, got {}", r.score);
+            }
+        }
+    }
+
+    #[test]
+    fn test_normalize_scores_empty_is_noop() {
+        let mut results: Vec<SearchResult> = vec![];
+        normalize_scores(&mut results);
+        assert!(results.is_empty());
+    }
+}

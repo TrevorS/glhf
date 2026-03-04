@@ -1,4 +1,4 @@
-.PHONY: help build release install clean test lint fmt check bench
+.PHONY: help build release install clean test lint fmt check bench prop fuzz
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -26,5 +26,11 @@ lint: ## Run clippy
 
 fmt: ## Format code
 	cargo fmt
+
+prop: ## Run property tests
+	cargo test proptest
+
+fuzz: ## Run primary fuzz target for 60s
+	cargo +nightly fuzz run fuzz_fts_escape -- -max_total_time=60
 
 check: fmt lint test ## Format, lint, and test

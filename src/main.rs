@@ -328,3 +328,56 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn proptest_parse_since_hours(n in 1..1000i64) {
+            let input = format!("{n}h");
+            let result = parse_since(&input);
+            prop_assert!(result.is_ok(), "Failed to parse {input}: {:?}", result);
+        }
+
+        #[test]
+        fn proptest_parse_since_days(n in 1..1000i64) {
+            let input = format!("{n}d");
+            let result = parse_since(&input);
+            prop_assert!(result.is_ok(), "Failed to parse {input}: {:?}", result);
+        }
+
+        #[test]
+        fn proptest_parse_since_weeks(n in 1..1000i64) {
+            let input = format!("{n}w");
+            let result = parse_since(&input);
+            prop_assert!(result.is_ok(), "Failed to parse {input}: {:?}", result);
+        }
+
+        #[test]
+        fn proptest_parse_since_iso_date(
+            y in 2000..2030i32,
+            m in 1..=12u32,
+            d in 1..=28u32,
+        ) {
+            let input = format!("{y}-{m:02}-{d:02}");
+            let result = parse_since(&input);
+            prop_assert!(result.is_ok(), "Failed to parse {input}: {:?}", result);
+        }
+
+        #[test]
+        fn proptest_parse_since_plain_numbers_err(n in 0..10000i64) {
+            let input = format!("{n}");
+            let result = parse_since(&input);
+            prop_assert!(result.is_err(), "Plain number should fail: {input}");
+        }
+
+        #[test]
+        fn proptest_parse_since_random_never_panics(input in "\\PC{0,50}") {
+            // Should never panic, just Ok or Err
+            let _ = parse_since(&input);
+        }
+    }
+}

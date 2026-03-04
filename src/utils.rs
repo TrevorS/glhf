@@ -56,6 +56,7 @@ pub fn truncate_text(content: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_short_text_unchanged() {
@@ -79,5 +80,39 @@ mod tests {
         let result = truncate_text("superlongwordthatexceedslimit", 10);
         assert!(result.ends_with("..."));
         assert!(result.len() <= 13); // 10 chars + "..."
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_truncate_never_panics(content in ".*", max_len in 0..1000usize) {
+            let _ = truncate_text(&content, max_len);
+        }
+
+        #[test]
+        fn proptest_truncate_output_is_valid_utf8(content in "\\PC*", max_len in 0..500usize) {
+            let result = truncate_text(&content, max_len);
+            // String type guarantees valid UTF-8, but let's be explicit
+            assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+        }
+
+        #[test]
+        fn proptest_truncate_respects_max_len(content in ".{1,200}", max_len in 1..200usize) {
+            let result = truncate_text(&content, max_len);
+            // Content before "..." should be <= max_len chars
+            let content_part = if let Some(stripped) = result.strip_suffix("...") {
+                stripped
+            } else {
+                &result
+            };
+            prop_assert!(content_part.chars().count() <= max_len);
+        }
+
+        #[test]
+        fn proptest_truncate_short_text_unchanged(content in "[a-z]{1,10}") {
+            // Short text with large max_len should be unchanged (after whitespace normalization)
+            let result = truncate_text(&content, 1000);
+            let normalized: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
+            prop_assert_eq!(result, normalized);
+        }
     }
 }

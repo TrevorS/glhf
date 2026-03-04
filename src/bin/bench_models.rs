@@ -19,7 +19,7 @@ use anyhow::Result;
 use model2vec_rs::model::StaticModel;
 use rusqlite::Connection;
 
-const MODEL_A_ID: &str = "minishlab/potion-base-32M";
+const MODEL_A_ID: &str = "minishlab/potion-retrieval-32M";
 const MODEL_B_ID: &str = "minishlab/potion-multilingual-128M";
 
 // Test case counts
@@ -163,7 +163,7 @@ fn main() -> Result<()> {
     let avg_mrr_b = (results_b_self.mrr + results_b_session.mrr + results_b_keyword.mrr) / 3.0;
 
     println!("                          Model A        Model B       Winner");
-    println!("                        (base-32M)   (multilingual)");
+    println!("                      (retrieval-32M) (multilingual)");
     println!("───────────────────────────────────────────────────────────────────");
     print_summary_row("Self-retrieval", results_a_self.mrr, results_b_self.mrr);
     print_summary_row(
@@ -554,9 +554,10 @@ fn print_summary_row(label: &str, a: f64, b: f64) {
 
 fn truncate(s: &str, max_len: usize) -> String {
     let s = s.replace('\n', " ").replace('\r', "");
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s
     } else {
-        format!("{}...", &s[..max_len.min(s.len())])
+        let truncated: String = s.chars().take(max_len).collect();
+        format!("{truncated}...")
     }
 }

@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Build & Development Commands
 
@@ -9,6 +9,8 @@ make check          # Format, lint, and test (run before commits)
 make build          # Build debug binary
 make release        # Build release binary
 make install        # Install to ~/.cargo/bin
+make prop           # Run property tests only
+make fuzz           # Run primary fuzz target for 60s (requires nightly)
 cargo test <name>   # Run a single test by name
 cargo bench         # Run benchmarks
 ```
@@ -100,7 +102,7 @@ glhf is a CLI tool for searching Claude Code conversation history using hybrid s
 
 1. **Ingest** (`ingest/`) - Walks `~/.claude/projects/` and parses JSONL conversation files
 2. **Document** (`document.rs`) - Extracts chunks: messages, tool_use, tool_result
-3. **Embed** (`embed.rs`) - Generates 256-dim embeddings via model2vec-rs (Potion-multilingual-128M)
+3. **Embed** (`embed.rs`) - Generates 512-dim embeddings via model2vec-rs (Potion-retrieval-32M)
 4. **Database** (`db/mod.rs`) - Stores in SQLite with FTS5 + sqlite-vec for hybrid search
 5. **Commands** (`commands.rs`) - CLI handlers for index, search, status, projects, session, related
 
@@ -148,10 +150,44 @@ glhf is a CLI tool for searching Claude Code conversation history using hybrid s
 
 ## Testing
 
-Integration tests in `tests/integration.rs` cover the full pipeline. Unit tests are co-located with modules. Embedding tests are `#[ignore]` tagged since they require model download.
+Unit tests are co-located with modules. Integration tests cover the full ingest/search pipeline. Search quality eval tests (`tests/search_quality.rs`) validate retrieval relevance against a 500-doc synthetic corpus.
 
 ```bash
-cargo test                    # Run all tests
-cargo test test_fts_search    # Run specific test
-cargo test -- --ignored       # Run ignored tests (requires model)
+cargo test                                       # Unit + integration + FTS quality tests
+cargo test test_fts_search                       # Run specific test by name
+cargo test --test search_quality                 # FTS search quality only (fast, no model)
+cargo test --test search_quality -- --ignored    # Full eval: semantic + hybrid (requires model)
+cargo test -- --ignored                          # All ignored tests (requires model)
 ```
+
+The search quality suite has 4 tiers:
+- **Tier 1 (FTS)**: 10 tests, no model needed, runs in CI
+- **Tier 2 (Semantic)**: 21 tests, requires model download, `#[ignore]` tagged
+- **Tier 3 (Hybrid/RRF)**: 3 tests, requires model download, `#[ignore]` tagged
+- **Tier 4 (Edge cases)**: 2 tests, no model needed
+
+The synthetic corpus in `tests/common/corpus.rs` provides `SearchCorpus::standard()` with topic clusters, distractors, homonym pairs, and noise docs. Use `insert_into(&mut db)` for FTS-only tests and `insert_with_embeddings(&mut db)` for semantic/hybrid tests.
+
+### Property Tests
+
+Property tests use `proptest` and are co-located with unit tests in each module. They verify invariants like "never panics on arbitrary input", roundtrip correctness, and mathematical properties (score normalization, RRF fusion ordering).
+
+```bash
+cargo test proptest                              # All property tests (~37 tests)
+cargo test --test property_tests                 # Integration-level property tests only
+```
+
+Property tests cover: FTS escape safety, embedding serialization roundtrips, RRF fusion invariants, score normalization, `parse_since` parsing, `truncate_text` bounds, `generate_id` determinism, `decode_project_path` safety, and JSONL parsing robustness.
+
+### Fuzz Testing
+
+Fuzz targets live in `fuzz/` (separate workspace, requires `cargo-fuzz` + nightly):
+
+```bash
+cargo +nightly fuzz run fuzz_fts_escape -- -max_total_time=60   # FTS query fuzzing
+cargo +nightly fuzz run fuzz_parse_jsonl -- -max_total_time=60  # JSONL parser
+cargo +nightly fuzz run fuzz_truncate -- -max_total_time=60     # Text truncation
+cargo +nightly fuzz run fuzz_decode_path -- -max_total_time=60  # Path decoding
+```
+
+`Database::open_in_memory()` is gated on `#[cfg(any(test, fuzzing))]` so fuzz targets can use it.
