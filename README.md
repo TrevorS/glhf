@@ -219,11 +219,38 @@ glhf status
 Output:
 ```
 Database Status
----------------
-Documents:  33371
-Embeddings: 33371
-Size:       162.35 MB
-Location:   /Users/you/Library/Caches/glhf/glhf.db
+───────────────
+Location:    /Users/you/Library/Caches/glhf/glhf.db
+Size:        297.57 MB
+Documents:   79,309 (79,309 with embeddings)
+
+Sessions & Projects
+───────────────────
+Sessions:    474
+Projects:    40
+
+Most active projects:
+  myapp                10,637 docs     31 sessions
+  api-server           10,528 docs    103 sessions
+  dashboard             9,664 docs     34 sessions
+
+Content Breakdown
+─────────────────
+Messages:    20,771 (3,881 user / 16,890 assistant)
+Tool calls:  29,009
+Tool results: 29,529 (1,298 errors)
+
+Top tools:
+  Bash           10,283
+  Read            9,353
+  Grep            2,561
+  Edit            2,470
+  Glob            1,557
+
+Timeline
+────────
+First indexed: 2026-01-09 (7w ago)
+Last indexed:  2026-03-04 (5m ago)
 ```
 
 ### `glhf index` - Build/rebuild search index
@@ -381,7 +408,7 @@ make bench    # Run benchmarks
 
 ### Dependencies
 
-- **Embeddings**: model2vec-rs with Potion-multilingual-128M (256 dimensions, auto-downloads)
+- **Embeddings**: model2vec-rs with Potion-retrieval-32M (512 dimensions, auto-downloads)
 - **Database**: SQLite with FTS5 + sqlite-vec
 - **No external setup required** - just `cargo build`
 

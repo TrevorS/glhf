@@ -18,6 +18,7 @@
 /target/criterion
 
 # Fuzz artifacts
+fuzz/target/
 fuzz/corpus/
 fuzz/artifacts/
 

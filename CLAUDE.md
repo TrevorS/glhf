@@ -123,7 +123,7 @@ glhf is a CLI tool for searching Claude Code conversation history using hybrid s
 | Module | Purpose |
 |--------|---------|
 | `main` | CLI argument parsing with clap |
-| `commands` | CLI command handlers (index, search, status, projects, session, related) |
+| `commands` | CLI command handlers (index, search, status, projects, session, related, recent) |
 | `config` | Database paths, Claude directory discovery |
 | `db` | SQLite with FTS5 + sqlite-vec, search methods |
 | `document` | Document struct, ChunkKind enum, DisplayLabel trait |

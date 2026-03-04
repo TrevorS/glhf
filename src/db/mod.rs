@@ -32,6 +32,21 @@ fn init_sqlite_vec() {
     });
 }
 
+/// Rich statistics for the status command.
+#[derive(Debug)]
+pub struct StatusStats {
+    pub session_count: i64,
+    pub project_count: i64,
+    pub top_projects: Vec<(String, i64, i64)>,
+    pub chunk_counts: std::collections::HashMap<String, i64>,
+    pub role_counts: std::collections::HashMap<String, i64>,
+    pub tool_counts: Vec<(String, i64)>,
+    pub error_count: i64,
+    pub tool_result_count: i64,
+    pub earliest_timestamp: Option<String>,
+    pub latest_timestamp: Option<String>,
+}
+
 /// A search result from the database.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
@@ -741,6 +756,100 @@ impl Database {
     /// Checks if embeddings exist in the database.
     pub fn has_embeddings(&self) -> Result<bool> {
         Ok(self.embedding_count()? > 0)
+    }
+
+    /// Gathers rich statistics for the status command.
+    pub fn status_stats(&self) -> Result<StatusStats> {
+        let session_count: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT session_id) FROM documents",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let project_count: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT project) FROM documents WHERE project IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let mut top_projects_stmt = self.conn.prepare(
+            r"SELECT project, COUNT(*) as doc_count, COUNT(DISTINCT session_id) as sess_count
+              FROM documents WHERE project IS NOT NULL
+              GROUP BY project ORDER BY doc_count DESC LIMIT 5",
+        )?;
+        let top_projects = top_projects_stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut chunk_stmt = self
+            .conn
+            .prepare("SELECT chunk_kind, COUNT(*) FROM documents GROUP BY chunk_kind")?;
+        let chunk_counts: std::collections::HashMap<String, i64> = chunk_stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .collect();
+
+        let mut role_stmt = self.conn.prepare(
+            "SELECT role, COUNT(*) FROM documents WHERE chunk_kind = 'message' AND role IS NOT NULL GROUP BY role",
+        )?;
+        let role_counts: std::collections::HashMap<String, i64> = role_stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .collect();
+
+        let mut tool_stmt = self.conn.prepare(
+            r"SELECT tool_name, COUNT(*) as cnt FROM documents
+              WHERE chunk_kind = 'tool_use' AND tool_name IS NOT NULL
+              GROUP BY tool_name ORDER BY cnt DESC LIMIT 5",
+        )?;
+        let tool_counts = tool_stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let error_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM documents WHERE chunk_kind = 'tool_result' AND is_error = 1",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let tool_result_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM documents WHERE chunk_kind = 'tool_result'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let (earliest, latest): (Option<String>, Option<String>) = self.conn.query_row(
+            "SELECT MIN(timestamp), MAX(timestamp) FROM documents WHERE timestamp IS NOT NULL",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        Ok(StatusStats {
+            session_count,
+            project_count,
+            top_projects,
+            chunk_counts,
+            role_counts,
+            tool_counts,
+            error_count,
+            tool_result_count,
+            earliest_timestamp: earliest,
+            latest_timestamp: latest,
+        })
     }
 
     /// Lists all indexed projects with document counts and last activity.

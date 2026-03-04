@@ -659,6 +659,7 @@ fn print_result_with_context(
 }
 
 /// Prints database status information to stdout.
+#[allow(clippy::cast_possible_wrap)]
 pub fn status() -> Result<()> {
     let db_path = config::database_path()?;
 
@@ -672,16 +673,90 @@ pub fn status() -> Result<()> {
     let doc_count = db.document_count()?;
     let embedding_count = db.embedding_count()?;
     let size = db.file_size().unwrap_or(0);
+    let stats = db.status_stats()?;
 
+    // Database Status
     println!("Database Status");
-    println!("---------------");
-    println!("Documents:  {doc_count}");
-    println!("Embeddings: {embedding_count}");
-    println!("Size:       {}", format_size(size));
-    println!("Location:   {}", db_path.display());
+    println!("{}", "─".repeat(15));
+    println!("Location:    {}", db_path.display());
+    println!("Size:        {}", format_size(size));
+    println!(
+        "Documents:   {} ({} with embeddings)",
+        format_number(doc_count as i64),
+        format_number(embedding_count as i64),
+    );
 
     if embedding_count == 0 && doc_count > 0 {
-        println!("\nNote: No embeddings found. Run 'glhf index' to enable semantic search.");
+        println!("\n  Note: No embeddings found. Run 'glhf index' to enable semantic search.");
+    }
+
+    // Sessions & Projects
+    println!("\nSessions & Projects");
+    println!("{}", "─".repeat(19));
+    println!("Sessions:    {}", format_number(stats.session_count));
+    println!("Projects:    {}", format_number(stats.project_count));
+
+    if !stats.top_projects.is_empty() {
+        println!("\nMost active projects:");
+        for (project, doc_cnt, sess_cnt) in &stats.top_projects {
+            let name = project_name(Some(project.as_str()));
+            println!(
+                "  {:<20} {:>6} docs   {:>4} sessions",
+                truncate_text(name, 20),
+                format_number(*doc_cnt),
+                format_number(*sess_cnt),
+            );
+        }
+    }
+
+    // Content Breakdown
+    println!("\nContent Breakdown");
+    println!("{}", "─".repeat(17));
+
+    let message_count = stats.chunk_counts.get("message").copied().unwrap_or(0);
+    let user_count = stats.role_counts.get("user").copied().unwrap_or(0);
+    let assistant_count = stats.role_counts.get("assistant").copied().unwrap_or(0);
+    let tool_use_count = stats.chunk_counts.get("tool_use").copied().unwrap_or(0);
+
+    println!(
+        "Messages:    {} ({} user / {} assistant)",
+        format_number(message_count),
+        format_number(user_count),
+        format_number(assistant_count),
+    );
+    println!("Tool calls:  {}", format_number(tool_use_count));
+    println!(
+        "Tool results: {} ({} errors)",
+        format_number(stats.tool_result_count),
+        format_number(stats.error_count),
+    );
+
+    if !stats.tool_counts.is_empty() {
+        println!("\nTop tools:");
+        for (tool, count) in &stats.tool_counts {
+            println!("  {:<14} {:>6}", tool, format_number(*count));
+        }
+    }
+
+    // Timeline
+    if stats.earliest_timestamp.is_some() || stats.latest_timestamp.is_some() {
+        println!("\nTimeline");
+        println!("{}", "─".repeat(8));
+
+        if let Some(ref ts) = stats.earliest_timestamp {
+            println!(
+                "First indexed: {} ({})",
+                format_date(Some(ts.as_str())),
+                format_relative_time(Some(ts.as_str())),
+            );
+        }
+        if let Some(ref ts) = stats.latest_timestamp {
+            println!(
+                "Last indexed:  {} ({})",
+                format_date(Some(ts.as_str())),
+                format_relative_time(Some(ts.as_str())),
+            );
+        }
     }
 
     Ok(())
@@ -1385,6 +1460,39 @@ fn filter_result(
     }
 
     true
+}
+
+/// Formats a number with comma separators (e.g., 12847 -> "12,847").
+fn format_number(n: i64) -> String {
+    let s = n.to_string();
+    // Handle negative numbers: skip the '-' for digit grouping
+    let (prefix, digits) = if let Some(stripped) = s.strip_prefix('-') {
+        ("-", stripped)
+    } else {
+        ("", s.as_str())
+    };
+    let mut result = String::with_capacity(s.len() + digits.len() / 3);
+    result.push_str(prefix);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result
+}
+
+/// Formats a timestamp as a date string (e.g., "2025-01-15").
+fn format_date(timestamp: Option<&str>) -> String {
+    let Some(ts_str) = timestamp else {
+        return "unknown".to_string();
+    };
+
+    let Ok(ts) = DateTime::parse_from_rfc3339(ts_str) else {
+        return "unknown".to_string();
+    };
+
+    ts.format("%Y-%m-%d").to_string()
 }
 
 /// Format bytes as human-readable size.

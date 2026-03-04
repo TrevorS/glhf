@@ -22,7 +22,7 @@ bench: ## Run benchmarks
 	cargo bench
 
 lint: ## Run clippy
-	cargo clippy -- -D warnings
+	cargo clippy --all-targets -- -D warnings
 
 fmt: ## Format code
 	cargo fmt
