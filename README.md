@@ -13,6 +13,7 @@ A CLI tool for searching your Claude Code conversation history. Works for both h
 - **Session viewer** - view full conversations or quick summaries
 - **Related sessions** - find similar past work using embeddings
 - **JSON output** - machine-readable format for scripting and agents
+- **Incremental indexing** - only re-processes changed files, sub-second updates
 - Fast SQLite-based indexing with FTS5 and sqlite-vec
 
 ## Installation
@@ -253,15 +254,22 @@ First indexed: 2026-01-09 (7w ago)
 Last indexed:  2026-03-04 (5m ago)
 ```
 
-### `glhf index` - Build/rebuild search index
+### `glhf index` - Build/update search index
 
 ```bash
-# Build index (always rebuilds from scratch)
+# Incremental update (only new/modified files, fast)
 glhf index
+
+# Full rebuild from scratch
+glhf index --full
 
 # Skip embeddings (text search only, faster)
 glhf index --skip-embeddings
 ```
+
+Indexing is **incremental by default** — it tracks file modification times and only re-processes changed files. A typical incremental update takes under a second. Use `--full` to force a complete rebuild.
+
+Search automatically checks index freshness and prints a note if files have changed since the last index.
 
 ## Common Workflows
 

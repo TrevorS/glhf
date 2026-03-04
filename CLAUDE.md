@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+direct-commits-allowed: true
+
 ## Build & Development Commands
 
 ```bash
@@ -18,6 +20,8 @@ cargo bench         # Run benchmarks
 ## Using glhf (for Claude)
 
 glhf searches your Claude Code conversation history. Use it to find past solutions, recall commands, and discover related work.
+
+**Index management:** Search prints a staleness note (e.g., "Index is 5 files behind") when files have changed since the last index. Run `glhf index` for a fast incremental update (only changed files) or `glhf index --full` to rebuild from scratch.
 
 ### Quick Reference
 
@@ -85,6 +89,36 @@ glhf related <session-id> --limit 5
 | `--summary` | Session overview without full content |
 | `--limit N` | Control output size |
 
+### All Search Flags
+
+These are the ONLY valid flags for `glhf search`. Do not invent others.
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--limit N` | `-l N` | Max results (default: 10) |
+| `--mode MODE` | `-m MODE` | hybrid (default), text, or semantic |
+| `--regex` | `-e` | Interpret query as regex |
+| `--ignore-case` | `-i` | Case-insensitive (regex mode) |
+| `--after-context N` | `-A N` | Show N messages after each match |
+| `--before-context N` | `-B N` | Show N messages before each match |
+| `--context N` | `-C N` | Show N messages before and after |
+| `--tool NAME` | `-t NAME` | Filter by tool (Bash, Read, Edit, etc.) |
+| `--project NAME` | `-p NAME` | Filter by project (use `.` for current) |
+| `--errors` | | Only show error results |
+| `--messages-only` | | Only human/AI messages (no tool calls) |
+| `--tools-only` | | Only tool calls (no messages) |
+| `--json` | | Machine-readable JSON output |
+| `--compact` | | One line per result |
+| `--show-session-id` | | Include session IDs |
+| `--scores` | | Show relevance scores |
+| `--since DURATION` | | Time filter (1h, 2d, 1w, or 2024-12-01) |
+| `--exclude-project NAME` | `-X NAME` | Exclude project (repeatable) |
+| `--exclude-this-project` | | Exclude current project |
+| `--include-this-project` | | Override default current-project exclusion |
+| `--include-this-session` | | Override default current-session exclusion |
+| `--this-session` | | Only show results from current session |
+| `--oldest` | | Show oldest results first |
+
 ### Tips
 
 1. **Use `--compact` by default** - reduces output tokens significantly
@@ -117,6 +151,10 @@ glhf is a CLI tool for searching Claude Code conversation history using hybrid s
 - **Chunk Types**: Three indexed types with shared `DisplayLabel` trait for consistent formatting across `Document` and `SearchResult`.
 
 - **Session Similarity**: The `related` command averages embeddings from a session to create a "session vector", then searches for similar documents from other sessions.
+
+- **Incremental Indexing**: The `index_meta` table tracks `(source_path, mtime_secs, doc_count)` per file. On `glhf index`, only files with changed mtimes are re-parsed. `--full` deletes the DB and rebuilds from scratch.
+
+- **sqlite-vec k limit**: sqlite-vec caps the knn `k` parameter at 4096. Filtered vector searches multiply the limit to over-fetch (since post-filtering reduces results), but must cap at 4096.
 
 ### Module Responsibilities
 

@@ -62,11 +62,15 @@ impl From<CliSearchMode> for SearchMode {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build or update the search index
+    /// Build or update the search index (incremental by default)
     Index {
         /// Skip embedding generation (text search only)
         #[arg(long)]
         skip_embeddings: bool,
+
+        /// Force a full rebuild instead of incremental update
+        #[arg(long)]
+        full: bool,
     },
 
     /// Search indexed content
@@ -247,8 +251,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Index { skip_embeddings } => {
-            glhf::commands::index(skip_embeddings)?;
+        Commands::Index {
+            skip_embeddings,
+            full,
+        } => {
+            glhf::commands::index(skip_embeddings, full)?;
         }
         Commands::Search {
             query,

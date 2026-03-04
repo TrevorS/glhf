@@ -87,6 +87,21 @@ pub fn file_history_snapshot() -> String {
     r#"{"type":"file-history-snapshot","messageId":"abc123","snapshot":{}}"#.to_string()
 }
 
+/// Generates a `tool_use` message JSON line
+pub fn tool_use_message(tool_name: &str, command: &str, session_id: &str) -> String {
+    format!(
+        r#"{{"type":"assistant","timestamp":"2025-01-15T10:00:03Z","sessionId":"{session_id}","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"tool-001","name":"{tool_name}","input":{{"command":"{command}"}}}}]}}}}"#
+    )
+}
+
+/// Generates a `tool_result` message JSON line
+pub fn tool_result_message(content: &str, is_error: bool, session_id: &str) -> String {
+    let error_field = if is_error { "true" } else { "false" };
+    format!(
+        r#"{{"type":"user","timestamp":"2025-01-15T10:00:04Z","sessionId":"{session_id}","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"tool-001","content":"{content}","is_error":{error_field}}}]}}}}"#
+    )
+}
+
 /// Generates malformed JSON
 pub fn malformed_json() -> String {
     r#"{"type":"user", this is not valid json"#.to_string()

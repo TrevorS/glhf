@@ -6,6 +6,7 @@
 use crate::document::{ChunkKind, DisplayLabel, Document};
 use crate::Result;
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Once;
@@ -149,6 +150,14 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_documents_project ON documents(project);
             CREATE INDEX IF NOT EXISTS idx_documents_chunk_kind ON documents(chunk_kind);
             CREATE INDEX IF NOT EXISTS idx_documents_tool_name ON documents(tool_name);
+            CREATE INDEX IF NOT EXISTS idx_documents_source_path ON documents(source_path);
+
+            -- Track indexed files for incremental updates
+            CREATE TABLE IF NOT EXISTS index_meta (
+                source_path TEXT PRIMARY KEY,
+                mtime_secs INTEGER NOT NULL,
+                doc_count INTEGER NOT NULL DEFAULT 0
+            );
             ",
         )?;
 
@@ -286,6 +295,67 @@ impl Database {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Returns the stored mtime (as seconds since epoch) for each indexed file.
+    pub fn get_indexed_files(&self) -> Result<HashMap<String, i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT source_path, mtime_secs FROM index_meta")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (path, mtime): (String, i64) = row?;
+            map.insert(path, mtime);
+        }
+        Ok(map)
+    }
+
+    /// Updates the index metadata for a file.
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn upsert_file_meta(
+        &self,
+        source_path: &str,
+        mtime_secs: i64,
+        doc_count: usize,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO index_meta (source_path, mtime_secs, doc_count) VALUES (?1, ?2, ?3)",
+            params![source_path, mtime_secs, doc_count as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes all documents (and their embeddings) from a given source file.
+    pub fn delete_documents_by_source(&self, source_path: &str) -> Result<usize> {
+        // Delete embeddings for docs from this file
+        self.conn.execute(
+            "DELETE FROM documents_vec WHERE id IN (SELECT id FROM documents WHERE source_path = ?1)",
+            params![source_path],
+        )?;
+        // Delete the documents themselves (FTS cleanup via trigger)
+        let count = self.conn.execute(
+            "DELETE FROM documents WHERE source_path = ?1",
+            params![source_path],
+        )?;
+        // Remove the meta entry
+        self.conn.execute(
+            "DELETE FROM index_meta WHERE source_path = ?1",
+            params![source_path],
+        )?;
+        Ok(count)
+    }
+
+    /// Returns document IDs that don't have embeddings yet.
+    pub fn documents_without_embeddings(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            r"SELECT d.id, d.content FROM documents d
+              LEFT JOIN documents_vec v ON d.id = v.id
+              WHERE v.id IS NULL",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// Returns the number of documents in the database.
@@ -527,7 +597,8 @@ impl Database {
 
         // Fetch more candidates since sqlite-vec's k limits before we can filter.
         // Use a high multiplier because messages are a small fraction of all documents.
-        let fetch_k = limit * 50;
+        // Cap at 4096 which is sqlite-vec's maximum k value.
+        let fetch_k = (limit * 50).min(4096);
 
         let mut sql = String::from(
             r"
@@ -988,8 +1059,9 @@ impl Database {
     ) -> Result<Vec<SearchResult>> {
         let embedding_bytes = embedding_to_bytes(query_embedding);
 
-        // We fetch more and filter, since we can't filter in the vec query
-        let fetch_limit = limit * 10;
+        // We fetch more and filter, since we can't filter in the vec query.
+        // Cap at 4096 which is sqlite-vec's maximum k value.
+        let fetch_limit = (limit * 10).min(4096);
 
         let mut stmt = self.conn.prepare(
             r"
@@ -1491,5 +1563,189 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn make_doc_with_source(content: &str, source: &str) -> Document {
+        Document::new(
+            ChunkKind::Message,
+            content.to_string(),
+            PathBuf::from(source),
+        )
+    }
+
+    #[test]
+    fn test_index_meta_empty() {
+        let db = Database::open_in_memory().unwrap();
+        let indexed = db.get_indexed_files().unwrap();
+        assert!(indexed.is_empty());
+    }
+
+    #[test]
+    fn test_upsert_and_get_file_meta() {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_file_meta("/test/a.jsonl", 1000, 5).unwrap();
+        db.upsert_file_meta("/test/b.jsonl", 2000, 10).unwrap();
+
+        let indexed = db.get_indexed_files().unwrap();
+        assert_eq!(indexed.len(), 2);
+        assert_eq!(indexed["/test/a.jsonl"], 1000);
+        assert_eq!(indexed["/test/b.jsonl"], 2000);
+    }
+
+    #[test]
+    fn test_upsert_file_meta_overwrites() {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_file_meta("/test/a.jsonl", 1000, 5).unwrap();
+        db.upsert_file_meta("/test/a.jsonl", 2000, 8).unwrap();
+
+        let indexed = db.get_indexed_files().unwrap();
+        assert_eq!(indexed.len(), 1);
+        assert_eq!(indexed["/test/a.jsonl"], 2000);
+    }
+
+    #[test]
+    fn test_delete_documents_by_source() {
+        let mut db = Database::open_in_memory().unwrap();
+
+        let docs = vec![
+            make_doc_with_source("doc from file a", "/test/a.jsonl"),
+            make_doc_with_source("another from file a", "/test/a.jsonl"),
+            make_doc_with_source("doc from file b", "/test/b.jsonl"),
+        ];
+        db.insert_documents(&docs).unwrap();
+        db.upsert_file_meta("/test/a.jsonl", 1000, 2).unwrap();
+        db.upsert_file_meta("/test/b.jsonl", 1000, 1).unwrap();
+
+        assert_eq!(db.document_count().unwrap(), 3);
+
+        let deleted = db.delete_documents_by_source("/test/a.jsonl").unwrap();
+        assert_eq!(deleted, 2);
+        assert_eq!(db.document_count().unwrap(), 1);
+
+        // Meta entry should also be removed
+        let indexed = db.get_indexed_files().unwrap();
+        assert_eq!(indexed.len(), 1);
+        assert!(!indexed.contains_key("/test/a.jsonl"));
+    }
+
+    #[test]
+    fn test_delete_documents_by_source_nonexistent() {
+        let db = Database::open_in_memory().unwrap();
+        let deleted = db
+            .delete_documents_by_source("/no/such/file.jsonl")
+            .unwrap();
+        assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn test_documents_without_embeddings() {
+        let mut db = Database::open_in_memory().unwrap();
+
+        let docs = vec![
+            make_doc("1", "hello world"),
+            make_doc("2", "goodbye world"),
+            make_doc("3", "third doc"),
+        ];
+        db.insert_documents(&docs).unwrap();
+
+        // All 3 should be missing embeddings
+        let missing = db.documents_without_embeddings().unwrap();
+        assert_eq!(missing.len(), 3);
+
+        // Add embedding for one doc
+        let fake_embedding = vec![0.0f32; EMBEDDING_DIM];
+        db.insert_embedding(&docs[0].id, &fake_embedding).unwrap();
+
+        // Now only 2 missing
+        let missing = db.documents_without_embeddings().unwrap();
+        assert_eq!(missing.len(), 2);
+        assert!(missing.iter().all(|(id, _)| *id != docs[0].id));
+    }
+
+    #[test]
+    fn test_delete_also_removes_embeddings() {
+        let mut db = Database::open_in_memory().unwrap();
+
+        let docs = vec![
+            make_doc_with_source("doc a", "/test/a.jsonl"),
+            make_doc_with_source("doc b", "/test/b.jsonl"),
+        ];
+        db.insert_documents(&docs).unwrap();
+
+        // Add embeddings for both
+        let fake_embedding = vec![0.0f32; EMBEDDING_DIM];
+        for doc in &docs {
+            db.insert_embedding(&doc.id, &fake_embedding).unwrap();
+        }
+        assert_eq!(db.embedding_count().unwrap(), 2);
+
+        // Delete file a's docs
+        db.delete_documents_by_source("/test/a.jsonl").unwrap();
+
+        assert_eq!(db.document_count().unwrap(), 1);
+        assert_eq!(db.embedding_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_incremental_workflow() {
+        let mut db = Database::open_in_memory().unwrap();
+
+        // Simulate first index: insert docs from two files
+        let docs_a = vec![
+            make_doc_with_source("alpha one", "/test/a.jsonl"),
+            make_doc_with_source("alpha two", "/test/a.jsonl"),
+        ];
+        let docs_b = vec![make_doc_with_source("beta one", "/test/b.jsonl")];
+
+        db.insert_documents(&docs_a).unwrap();
+        db.upsert_file_meta("/test/a.jsonl", 1000, 2).unwrap();
+        db.insert_documents(&docs_b).unwrap();
+        db.upsert_file_meta("/test/b.jsonl", 1000, 1).unwrap();
+
+        assert_eq!(db.document_count().unwrap(), 3);
+
+        // Simulate incremental: file a modified (new mtime), file b unchanged
+        let indexed = db.get_indexed_files().unwrap();
+        assert_eq!(indexed["/test/a.jsonl"], 1000);
+
+        // Re-ingest file a with new content
+        db.delete_documents_by_source("/test/a.jsonl").unwrap();
+        let new_docs_a = vec![
+            make_doc_with_source("alpha one updated", "/test/a.jsonl"),
+            make_doc_with_source("alpha two updated", "/test/a.jsonl"),
+            make_doc_with_source("alpha three new", "/test/a.jsonl"),
+        ];
+        db.insert_documents(&new_docs_a).unwrap();
+        db.upsert_file_meta("/test/a.jsonl", 2000, 3).unwrap();
+
+        assert_eq!(db.document_count().unwrap(), 4);
+        let indexed = db.get_indexed_files().unwrap();
+        assert_eq!(indexed["/test/a.jsonl"], 2000);
+
+        // FTS should find updated content
+        let results = db.search_fts("updated", 10).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Old content should be gone
+        let results = db.search_fts("alpha one", 10).unwrap();
+        // "alpha one updated" and "alpha one" — but old was deleted
+        for r in &results {
+            assert!(r.content.contains("updated") || r.content.contains("new"));
+        }
+    }
+
+    #[test]
+    fn test_clear_preserves_schema() {
+        let mut db = Database::open_in_memory().unwrap();
+        let docs = vec![make_doc("1", "test content")];
+        db.insert_documents(&docs).unwrap();
+        db.upsert_file_meta("/test/a.jsonl", 1000, 1).unwrap();
+
+        db.clear().unwrap();
+        assert_eq!(db.document_count().unwrap(), 0);
+
+        // Should still be able to insert after clear
+        db.insert_documents(&docs).unwrap();
+        assert_eq!(db.document_count().unwrap(), 1);
     }
 }

@@ -141,77 +141,118 @@ pub struct SearchOptions {
 }
 
 /// Builds or rebuilds the search index from all conversation files.
-pub fn index(skip_embeddings: bool) -> Result<()> {
+pub fn index(skip_embeddings: bool, full_rebuild: bool) -> Result<()> {
     let db_path = config::database_path()?;
 
-    if db_path.exists() {
+    if full_rebuild && db_path.exists() {
         std::fs::remove_file(&db_path)?;
+        println!("Full rebuild requested. Deleted existing database.");
     }
+
+    let is_incremental = db_path.exists();
 
     println!("Discovering conversation files...");
     let start = Instant::now();
 
-    // Ingest all documents
-    let documents = ingest::ingest_all().context("Failed to ingest documents")?;
-    let doc_count = documents.len();
+    let files_with_mtimes = ingest::discover_with_mtimes().context("Failed to discover files")?;
+    let total_files = files_with_mtimes.len();
 
-    if doc_count == 0 {
-        println!("No documents found to index.");
+    if total_files == 0 {
+        println!("No conversation files found.");
         return Ok(());
     }
 
-    println!("Found {doc_count} documents. Building database...");
-
-    // Create database and insert documents
     let mut db = Database::open(&db_path)?;
-    db.insert_documents(&documents)?;
+
+    // Determine which files need processing
+    let indexed_files = if is_incremental {
+        db.get_indexed_files()?
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    let mut new_files = Vec::new();
+    let mut modified_files = Vec::new();
+    let mut unchanged_count = 0usize;
+    let mut seen_paths = std::collections::HashSet::new();
+
+    for (path, mtime) in &files_with_mtimes {
+        let path_str = path.to_string_lossy().to_string();
+        seen_paths.insert(path_str.clone());
+        match indexed_files.get(&path_str) {
+            Some(&stored_mtime) if stored_mtime == *mtime => {
+                unchanged_count += 1;
+            }
+            Some(_) => modified_files.push((path.clone(), *mtime)),
+            None => new_files.push((path.clone(), *mtime)),
+        }
+    }
+
+    // Find deleted files (in DB but no longer on disk)
+    let deleted_files: Vec<_> = indexed_files
+        .keys()
+        .filter(|p| !seen_paths.contains(*p))
+        .cloned()
+        .collect();
+
+    let changes = new_files.len() + modified_files.len() + deleted_files.len();
+
+    if is_incremental && changes == 0 {
+        println!("Index is up to date ({total_files} files, {unchanged_count} unchanged).");
+        if !skip_embeddings {
+            // Still check for missing embeddings (e.g., previous --skip-embeddings run)
+            embed_missing(&mut db)?;
+        }
+        let size = db.file_size().unwrap_or(0);
+        println!("Database size: {}", format_size(size));
+        return Ok(());
+    }
+
+    if is_incremental {
+        println!(
+            "Incremental update: {} new, {} modified, {} deleted, {} unchanged",
+            new_files.len(),
+            modified_files.len(),
+            deleted_files.len(),
+            unchanged_count
+        );
+    } else {
+        println!("Building new index from {total_files} files...");
+    }
+
+    // Remove deleted files
+    for path_str in &deleted_files {
+        db.delete_documents_by_source(path_str)?;
+    }
+
+    // Re-ingest modified files (delete old docs first) and new files
+    for (path, mtime) in modified_files.iter().chain(new_files.iter()) {
+        let path_str = path.to_string_lossy().to_string();
+        // Safe to call even if no docs exist for this path yet
+        db.delete_documents_by_source(&path_str)?;
+        match ingest::parse_jsonl_file(path) {
+            Ok(docs) => {
+                let count = docs.len();
+                db.insert_documents(&docs)?;
+                db.upsert_file_meta(&path_str, *mtime, count)?;
+            }
+            Err(e) => eprintln!("Warning: Failed to parse {}: {e}", path.display()),
+        }
+    }
 
     let db_time = start.elapsed();
+    let total_docs = db.document_count()?;
     println!(
         "Indexed {} documents in {:.2}s",
-        doc_count,
+        total_docs,
         db_time.as_secs_f64()
     );
 
-    // Generate embeddings unless skipped
+    // Generate embeddings
     if skip_embeddings {
         println!("Skipping embeddings (text search only mode).");
     } else {
-        println!("\nGenerating embeddings (this may take a while on first run)...");
-        let embed_start = Instant::now();
-
-        let embedder = Embedder::new().context("Failed to initialize embedder")?;
-
-        // Collect document contents
-        let contents: Vec<String> = documents.iter().map(|d| d.content.clone()).collect();
-
-        // Generate embeddings with progress
-        let embeddings = embedder.embed_documents_with_progress(
-            &contents,
-            EMBEDDING_BATCH_SIZE,
-            |done, total| {
-                print!("\rEmbedding: {done}/{total} documents");
-                std::io::stdout().flush().ok();
-            },
-        )?;
-        println!();
-
-        // Insert embeddings (deduplicate by ID since content-hash IDs may repeat)
-        let mut seen = std::collections::HashSet::new();
-        let embedding_pairs: Vec<_> = documents
-            .iter()
-            .zip(embeddings.iter())
-            .filter(|(d, _)| seen.insert(d.id.clone()))
-            .map(|(d, e)| (d.id.as_str(), e.as_slice()))
-            .collect();
-        db.insert_embeddings(&embedding_pairs)?;
-
-        let embed_time = embed_start.elapsed();
-        println!(
-            "Generated {} embeddings in {:.2}s",
-            embeddings.len(),
-            embed_time.as_secs_f64()
-        );
+        embed_missing(&mut db)?;
     }
 
     // Show database size
@@ -220,6 +261,106 @@ pub fn index(skip_embeddings: bool) -> Result<()> {
     println!("Location: {}", db_path.display());
 
     Ok(())
+}
+
+/// Generates embeddings for any documents that don't have them yet.
+fn embed_missing(db: &mut Database) -> Result<()> {
+    let missing = db.documents_without_embeddings()?;
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    println!("\nGenerating embeddings for {} documents...", missing.len());
+    let embed_start = Instant::now();
+
+    let embedder = Embedder::new().context("Failed to initialize embedder")?;
+
+    let contents: Vec<String> = missing.iter().map(|(_, content)| content.clone()).collect();
+
+    let embeddings = embedder.embed_documents_with_progress(
+        &contents,
+        EMBEDDING_BATCH_SIZE,
+        |done, total| {
+            print!("\rEmbedding: {done}/{total} documents");
+            std::io::stdout().flush().ok();
+        },
+    )?;
+    println!();
+
+    let mut seen = std::collections::HashSet::new();
+    let embedding_pairs: Vec<_> = missing
+        .iter()
+        .zip(embeddings.iter())
+        .filter(|((id, _), _)| seen.insert(id.clone()))
+        .map(|((id, _), e)| (id.as_str(), e.as_slice()))
+        .collect();
+    db.insert_embeddings(&embedding_pairs)?;
+
+    let embed_time = embed_start.elapsed();
+    println!(
+        "Generated {} embeddings in {:.2}s",
+        embedding_pairs.len(),
+        embed_time.as_secs_f64()
+    );
+
+    Ok(())
+}
+
+/// Checks how fresh the index is and prints a hint if stale.
+fn check_index_freshness(db: &Database) -> Result<()> {
+    let indexed_files = db.get_indexed_files()?;
+    if indexed_files.is_empty() {
+        return Ok(());
+    }
+
+    let files_with_mtimes = ingest::discover_with_mtimes().unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    let mut new_count = 0usize;
+    let mut modified_count = 0usize;
+
+    for (path, mtime) in &files_with_mtimes {
+        let path_str = path.to_string_lossy().to_string();
+        seen.insert(path_str.clone());
+        match indexed_files.get(&path_str) {
+            Some(&stored_mtime) if stored_mtime == *mtime => {}
+            Some(_) => modified_count += 1,
+            None => new_count += 1,
+        }
+    }
+
+    let deleted_count = indexed_files.keys().filter(|p| !seen.contains(*p)).count();
+    let total_stale = new_count + modified_count + deleted_count;
+
+    if total_stale > 0 {
+        // Find the most recent index time
+        let last_indexed = indexed_files.values().max().copied().unwrap_or(0);
+        let ago = format_seconds_ago(last_indexed);
+        eprintln!(
+            "Note: Index is {total_stale} files behind (last indexed {ago}). \
+             Run `glhf index` to update or `glhf index --full` to rebuild."
+        );
+    }
+
+    Ok(())
+}
+
+/// Formats seconds-since-epoch as a human-readable "ago" string.
+#[allow(clippy::cast_possible_wrap)]
+fn format_seconds_ago(epoch_secs: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let delta = now - epoch_secs;
+    if delta < 60 {
+        "just now".to_string()
+    } else if delta < 3600 {
+        format!("{}m ago", delta / 60)
+    } else if delta < 86400 {
+        format!("{}h ago", delta / 3600)
+    } else {
+        format!("{}d ago", delta / 86400)
+    }
 }
 
 /// Determines the effective search mode, falling back to text if embeddings unavailable.
@@ -380,6 +521,10 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
     }
 
     let db = Database::open(&db_path).context("Failed to open database")?;
+
+    // Check index freshness and print a hint if stale
+    check_index_freshness(&db)?;
+
     let chunk_kind = options.messages_only.then_some(ChunkKind::Message);
 
     // Check if running inside Claude Code
@@ -1346,11 +1491,15 @@ fn print_session_message(msg: &SearchResult) {
     println!("\n{header}");
     println!("{}", "─".repeat(40));
 
-    // Print content (truncate very long content)
+    // Print content (truncate very long content, respecting char boundaries)
     let content = if msg.content.len() > 2000 {
+        let mut end = 2000;
+        while end > 0 && !msg.content.is_char_boundary(end) {
+            end -= 1;
+        }
         format!(
             "{}...\n[truncated, {} total chars]",
-            &msg.content[..2000],
+            &msg.content[..end],
             msg.content.len()
         )
     } else {
