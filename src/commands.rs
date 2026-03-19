@@ -220,13 +220,18 @@ pub fn index(skip_embeddings: bool, full_rebuild: bool) -> Result<()> {
         println!("Building new index from {total_files} files...");
     }
 
+    // Wrap all writes in a single transaction for performance
+    db.begin_transaction()?;
+
     // Remove deleted files
     for path_str in &deleted_files {
         db.delete_documents_by_source(path_str)?;
     }
 
     // Re-ingest modified files (delete old docs first) and new files
-    for (path, mtime) in modified_files.iter().chain(new_files.iter()) {
+    let files_to_process: Vec<_> = modified_files.iter().chain(new_files.iter()).collect();
+    let total = files_to_process.len();
+    for (i, (path, mtime)) in files_to_process.iter().enumerate() {
         let path_str = path.to_string_lossy().to_string();
         // Safe to call even if no docs exist for this path yet
         db.delete_documents_by_source(&path_str)?;
@@ -238,7 +243,13 @@ pub fn index(skip_embeddings: bool, full_rebuild: bool) -> Result<()> {
             }
             Err(e) => eprintln!("Warning: Failed to parse {}: {e}", path.display()),
         }
+        if (i + 1) % 100 == 0 || i + 1 == total {
+            eprint!("\rProcessing files: {}/{total}", i + 1);
+        }
     }
+    eprintln!();
+
+    db.commit_transaction()?;
 
     let db_time = start.elapsed();
     let total_docs = db.document_count()?;

@@ -109,6 +109,13 @@ impl Database {
         }
 
         let conn = Connection::open(path)?;
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA cache_size = -64000;
+             PRAGMA temp_store = MEMORY;",
+        )?;
         let db = Self { conn };
         db.init_schema()?;
         Ok(db)
@@ -200,6 +207,18 @@ impl Database {
         Ok(())
     }
 
+    /// Begins a deferred transaction for batching multiple operations.
+    pub fn begin_transaction(&self) -> Result<()> {
+        self.conn.execute_batch("BEGIN DEFERRED")?;
+        Ok(())
+    }
+
+    /// Commits the current transaction.
+    pub fn commit_transaction(&self) -> Result<()> {
+        self.conn.execute_batch("COMMIT")?;
+        Ok(())
+    }
+
     /// Clears all data from the database.
     pub fn clear(&self) -> Result<()> {
         self.conn.execute_batch(
@@ -238,9 +257,9 @@ impl Database {
         Ok(())
     }
 
-    /// Inserts multiple documents in a transaction.
+    /// Inserts multiple documents in a savepoint (nestable within outer transactions).
     pub fn insert_documents(&mut self, docs: &[Document]) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.savepoint()?;
         {
             let mut stmt = tx.prepare(
                 r"

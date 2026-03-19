@@ -154,6 +154,8 @@ glhf is a CLI tool for searching Claude Code conversation history using hybrid s
 
 - **Incremental Indexing**: The `index_meta` table tracks `(source_path, mtime_secs, doc_count)` per file. On `glhf index`, only files with changed mtimes are re-parsed. `--full` deletes the DB and rebuilds from scratch.
 
+- **SQLite Performance**: Connection opens with WAL mode, `synchronous=NORMAL`, and 64MB cache. The indexing loop wraps all file operations in a single transaction to avoid per-file fsyncs. `insert_documents` uses savepoints (nestable within the outer transaction).
+
 - **sqlite-vec k limit**: sqlite-vec caps the knn `k` parameter at 4096. Filtered vector searches multiply the limit to over-fetch (since post-filtering reduces results), but must cap at 4096.
 
 ### Module Responsibilities
