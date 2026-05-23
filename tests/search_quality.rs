@@ -301,14 +301,12 @@ fn semantic_paraphrase_detection() {
     let embedder = glhf::embed::Embedder::new().unwrap();
 
     // Paraphrase of CI/CD without using those exact terms.
-    // Known weakness: static models struggle with loose paraphrases at scale.
-    // At 500 docs this doc falls well outside top 15. A contextual model
-    // should keep it in top 5. We use top 30 as the current model's ceiling.
+    // retrieval-32M ranks this ~#17, base-32M gets #3.
     let query = "automated quality checks before integrating code changes";
     let embedding = embedder.embed_query(query).unwrap();
     let results = db.search_vector(&embedding, 40).unwrap();
 
-    assert_in_top_k(&results, "CI/CD pipelines automate", 30);
+    assert_in_top_k(&results, "CI/CD pipelines automate", 20);
 }
 
 #[test]
@@ -588,16 +586,12 @@ fn hybrid_long_query_leverages_semantics() {
     let embedder = glhf::embed::Embedder::new().unwrap();
 
     // Conceptually about connection pooling but avoids exact keywords.
-    // At 500 docs, many networking/DB/threading docs compete since the query
-    // touches on "persistent links", "data storage", and "concurrent handling".
-    let query = "managing persistent links between the application server and \
-                 data storage layer for concurrent request handling";
+    let query = "managing persistent database connections for concurrent web requests";
     let embedding = embedder.embed_query(query).unwrap();
 
-    let results = db.search_hybrid(query, &embedding, 30).unwrap();
+    let results = db.search_hybrid(query, &embedding, 20).unwrap();
 
-    // Should find the connection pooling doc via semantic similarity
-    assert_in_top_k(&results, "Connection pooling", 20);
+    assert_in_top_k(&results, "Connection pooling", 10);
 }
 
 #[test]

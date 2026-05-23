@@ -1,13 +1,13 @@
 //! Embeddings generation using model2vec.
 //!
 //! This module provides a wrapper around model2vec for generating text embeddings
-//! using the Potion-retrieval-32M model (512 dimensions).
+//! using the Potion-base-32M model (512 dimensions).
 
 use crate::error::Error;
 use crate::Result;
 use model2vec_rs::model::StaticModel;
 
-const MODEL_ID: &str = "minishlab/potion-retrieval-32M";
+const MODEL_ID: &str = "minishlab/potion-base-32M";
 
 /// Wrapper around model2vec for generating text embeddings.
 pub struct Embedder {
@@ -15,9 +15,7 @@ pub struct Embedder {
 }
 
 impl Embedder {
-    /// Creates a new embedder with Potion-retrieval-32M.
-    ///
-    /// This will download the model on first use.
+    /// Creates a new embedder, downloading the model on first use.
     pub fn new() -> Result<Self> {
         let model = StaticModel::from_pretrained(MODEL_ID, None, None, None).map_err(|e| {
             Error::Embedding {

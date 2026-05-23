@@ -19,8 +19,8 @@ use anyhow::Result;
 use model2vec_rs::model::StaticModel;
 use rusqlite::Connection;
 
-const MODEL_A_ID: &str = "minishlab/potion-retrieval-32M";
-const MODEL_B_ID: &str = "minishlab/potion-multilingual-128M";
+const MODEL_A_ID: &str = "minishlab/potion-base-32M";
+const MODEL_B_ID: &str = "minishlab/potion-retrieval-32M";
 
 // Test case counts
 const SELF_RETRIEVAL_COUNT: usize = 100;

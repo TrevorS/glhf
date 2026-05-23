@@ -15,7 +15,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 hex = "0.4.3"
-model2vec-rs = "0.1"
+model2vec-rs = "0.2"
 regex = "1"
 rusqlite = { version = "0.38", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -23,7 +23,6 @@ serde_json = "1"
 sha2 = "0.10.9"
 sqlite-vec = "0.1"
 thiserror = "2"
-uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 
 [dev-dependencies]
