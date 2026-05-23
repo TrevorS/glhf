@@ -109,16 +109,13 @@ fn extract_chunks(
     };
 
     match content {
-        // Simple string content - just a message
-        Value::String(s) => {
-            if !s.trim().is_empty() {
-                let doc = Document::new(ChunkKind::Message, s.clone(), path.to_path_buf())
-                    .with_project(project.map(String::from))
-                    .with_timestamp(timestamp)
-                    .with_session_id(session_id)
-                    .with_role(role);
-                documents.push(doc);
-            }
+        Value::String(s) if !s.trim().is_empty() => {
+            let doc = Document::new(ChunkKind::Message, s.clone(), path.to_path_buf())
+                .with_project(project.map(String::from))
+                .with_timestamp(timestamp)
+                .with_session_id(session_id)
+                .with_role(role);
+            documents.push(doc);
         }
 
         // Array of content blocks

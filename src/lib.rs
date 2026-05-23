@@ -13,12 +13,18 @@
 //! use glhf::embed::Embedder;
 //! use glhf::ingest;
 //!
-//! // Ingest all conversation files
-//! let documents = ingest::ingest_all().unwrap();
+//! // Discover and parse conversation files
+//! let files = ingest::discover_conversation_files().unwrap();
+//! let mut documents = Vec::new();
+//! for path in &files {
+//!     if let Ok(docs) = ingest::parse_jsonl_file(path) {
+//!         documents.extend(docs);
+//!     }
+//! }
 //!
 //! // Create database and embedder
 //! let mut db = Database::open(std::path::Path::new("/tmp/glhf.db")).unwrap();
-//! let mut embedder = Embedder::new().unwrap();
+//! let embedder = Embedder::new().unwrap();
 //!
 //! // Insert documents
 //! db.insert_documents(&documents).unwrap();
@@ -47,6 +53,8 @@ pub mod db;
 pub mod document;
 pub mod embed;
 pub mod error;
+pub mod filter;
+pub mod format;
 pub mod ingest;
 pub mod utils;
 

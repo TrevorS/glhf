@@ -9,7 +9,6 @@ pub use conversation::parse_jsonl_file;
 
 use crate::config;
 use crate::error::Result;
-use crate::Document;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use walkdir::WalkDir;
@@ -61,32 +60,6 @@ pub fn discover_with_mtimes() -> Result<Vec<(PathBuf, i64)>> {
         result.push((path, mtime));
     }
     Ok(result)
-}
-
-/// Ingests all conversation files and returns Documents.
-///
-/// Parse errors for individual files are logged to stderr but do not
-/// cause the entire operation to fail.
-///
-/// # Errors
-///
-/// Returns an error if the projects directory cannot be determined.
-pub fn ingest_all() -> Result<Vec<Document>> {
-    let files = discover_conversation_files()?;
-    let mut all_docs = Vec::with_capacity(files.len() * 10); // Estimate ~10 docs per file
-
-    for file_path in files {
-        match parse_jsonl_file(&file_path) {
-            Ok(docs) => {
-                all_docs.extend(docs);
-            }
-            Err(e) => {
-                eprintln!("Warning: Failed to parse {}: {}", file_path.display(), e);
-            }
-        }
-    }
-
-    Ok(all_docs)
 }
 
 /// Extracts the project name from a JSONL file path.

@@ -2,31 +2,35 @@
 
 use crate::config;
 use crate::db::{Database, SearchResult};
-use crate::document::{ChunkKind, DisplayLabel};
+use crate::document::ChunkKind;
 use crate::embed::Embedder;
 use crate::error::Error;
+use crate::filter;
+use crate::format::{
+    format_date, format_number, format_relative_time, format_seconds_ago, format_size,
+    print_result_compact, print_result_header, print_result_with_context, print_session_message,
+    print_session_summary, project_name, RESULT_SNIPPET_LEN,
+};
 use crate::ingest;
 use crate::utils::truncate_text;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::time::Instant;
 
-/// Batch size for embedding generation (optimized for GPU efficiency).
+/// Batch size for embedding generation.
 const EMBEDDING_BATCH_SIZE: usize = 2048;
 
-/// Maximum characters for result snippets.
-const RESULT_SNIPPET_LEN: usize = 200;
-
-/// Maximum characters for context message snippets.
-const CONTEXT_SNIPPET_LEN: usize = 150;
+fn open_db() -> Result<Database> {
+    let db_path = config::database_path()?;
+    if !db_path.exists() {
+        return Err(Error::DatabaseNotFound { path: db_path }.into());
+    }
+    Database::open(&db_path).context("Failed to open database")
+}
 
 /// Normalizes scores to 0-1 range within the result set.
-///
-/// Uses min-max normalization so the best result has score 1.0 and
-/// the worst has score 0.0. This makes scores comparable within a
-/// single search, though not across different searches.
 fn normalize_scores(results: &mut [SearchResult]) {
     if results.is_empty() {
         return;
@@ -42,7 +46,6 @@ fn normalize_scores(results: &mut [SearchResult]) {
         .fold(f64::NEG_INFINITY, f64::max);
 
     if (max - min).abs() < f64::EPSILON {
-        // All same score → all 1.0
         for r in results.iter_mut() {
             r.score = 1.0;
         }
@@ -53,25 +56,27 @@ fn normalize_scores(results: &mut [SearchResult]) {
     }
 }
 
-/// Normalizes scores for ranked sessions (used by `related` command).
 fn normalize_ranked_sessions(sessions: &mut [RankedSession]) {
     if sessions.is_empty() {
         return;
     }
 
-    let min = sessions.iter().map(|s| s.1).fold(f64::INFINITY, f64::min);
+    let min = sessions
+        .iter()
+        .map(|s| s.score)
+        .fold(f64::INFINITY, f64::min);
     let max = sessions
         .iter()
-        .map(|s| s.1)
+        .map(|s| s.score)
         .fold(f64::NEG_INFINITY, f64::max);
 
     if (max - min).abs() < f64::EPSILON {
         for s in sessions.iter_mut() {
-            s.1 = 1.0;
+            s.score = 1.0;
         }
     } else {
         for s in sessions.iter_mut() {
-            s.1 = (s.1 - min) / (max - min);
+            s.score = (s.score - min) / (max - min);
         }
     }
 }
@@ -79,12 +84,9 @@ fn normalize_ranked_sessions(sessions: &mut [RankedSession]) {
 /// Search mode for queries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SearchMode {
-    /// Hybrid search combining FTS5 and vector search.
     #[default]
     Hybrid,
-    /// Full-text search only (FTS5).
     Text,
-    /// Semantic/vector search only.
     Semantic,
 }
 
@@ -92,52 +94,44 @@ pub enum SearchMode {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default)]
 pub struct SearchOptions {
-    /// Maximum number of results to return.
     pub limit: usize,
-    /// Search mode (hybrid, text, semantic).
     pub mode: SearchMode,
-    /// Whether to interpret query as a regex pattern.
     pub regex: bool,
-    /// Whether to do case-insensitive matching.
     pub ignore_case: bool,
-    /// Number of messages to show before each match.
     pub before: usize,
-    /// Number of messages to show after each match.
     pub after: usize,
-    /// Filter to a specific tool name (e.g., "Bash", "Read").
     pub tool: Option<String>,
-    /// Filter to a specific project (substring match, case-insensitive).
     pub project: Option<String>,
-    /// Only show error results.
     pub errors: bool,
-    /// Only show message chunks (exclude tools).
     pub messages_only: bool,
-    /// Only show tool chunks (exclude messages).
     pub tools_only: bool,
-    /// Output results as JSON.
     pub json: bool,
-    /// Compact output format (one line per result).
     pub compact: bool,
-    /// Show session IDs in results.
     pub show_session_id: bool,
-    /// Only show results since this timestamp.
     pub since: Option<DateTime<Utc>>,
-    /// Show relevance scores in output.
     pub show_scores: bool,
-    /// Projects to exclude from results.
     pub exclude_projects: Vec<String>,
-    /// Exclude current project from results.
     pub exclude_this_project: bool,
-    /// Include current project (overrides default exclusion).
     pub include_this_project: bool,
-    /// Exclude current session from results.
     pub exclude_this_session: bool,
-    /// Include current session (overrides default exclusion).
     pub include_this_session: bool,
-    /// Filter to current session only.
     pub this_session: bool,
-    /// Show oldest results first.
     pub oldest_first: bool,
+}
+
+impl SearchOptions {
+    pub fn has_filters(&self) -> bool {
+        self.tool.is_some()
+            || self.project.is_some()
+            || self.errors
+            || self.messages_only
+            || self.tools_only
+            || self.since.is_some()
+            || !self.exclude_projects.is_empty()
+            || self.exclude_this_project
+            || self.exclude_this_session
+            || self.this_session
+    }
 }
 
 /// Builds or rebuilds the search index from all conversation files.
@@ -164,17 +158,16 @@ pub fn index(skip_embeddings: bool, full_rebuild: bool) -> Result<()> {
 
     let mut db = Database::open(&db_path)?;
 
-    // Determine which files need processing
     let indexed_files = if is_incremental {
         db.get_indexed_files()?
     } else {
-        std::collections::HashMap::new()
+        HashMap::new()
     };
 
     let mut new_files = Vec::new();
     let mut modified_files = Vec::new();
     let mut unchanged_count = 0usize;
-    let mut seen_paths = std::collections::HashSet::new();
+    let mut seen_paths = HashSet::new();
 
     for (path, mtime) in &files_with_mtimes {
         let path_str = path.to_string_lossy().to_string();
@@ -188,7 +181,6 @@ pub fn index(skip_embeddings: bool, full_rebuild: bool) -> Result<()> {
         }
     }
 
-    // Find deleted files (in DB but no longer on disk)
     let deleted_files: Vec<_> = indexed_files
         .keys()
         .filter(|p| !seen_paths.contains(*p))
@@ -200,7 +192,6 @@ pub fn index(skip_embeddings: bool, full_rebuild: bool) -> Result<()> {
     if is_incremental && changes == 0 {
         println!("Index is up to date ({total_files} files, {unchanged_count} unchanged).");
         if !skip_embeddings {
-            // Still check for missing embeddings (e.g., previous --skip-embeddings run)
             embed_missing(&mut db)?;
         }
         let size = db.file_size().unwrap_or(0);
@@ -220,20 +211,16 @@ pub fn index(skip_embeddings: bool, full_rebuild: bool) -> Result<()> {
         println!("Building new index from {total_files} files...");
     }
 
-    // Wrap all writes in a single transaction for performance
     db.begin_transaction()?;
 
-    // Remove deleted files
     for path_str in &deleted_files {
         db.delete_documents_by_source(path_str)?;
     }
 
-    // Re-ingest modified files (delete old docs first) and new files
     let files_to_process: Vec<_> = modified_files.iter().chain(new_files.iter()).collect();
     let total = files_to_process.len();
     for (i, (path, mtime)) in files_to_process.iter().enumerate() {
         let path_str = path.to_string_lossy().to_string();
-        // Safe to call even if no docs exist for this path yet
         db.delete_documents_by_source(&path_str)?;
         match ingest::parse_jsonl_file(path) {
             Ok(docs) => {
@@ -259,14 +246,12 @@ pub fn index(skip_embeddings: bool, full_rebuild: bool) -> Result<()> {
         db_time.as_secs_f64()
     );
 
-    // Generate embeddings
     if skip_embeddings {
         println!("Skipping embeddings (text search only mode).");
     } else {
         embed_missing(&mut db)?;
     }
 
-    // Show database size
     let size = db.file_size().unwrap_or(0);
     println!("\nDatabase size: {}", format_size(size));
     println!("Location: {}", db_path.display());
@@ -274,7 +259,6 @@ pub fn index(skip_embeddings: bool, full_rebuild: bool) -> Result<()> {
     Ok(())
 }
 
-/// Generates embeddings for any documents that don't have them yet.
 fn embed_missing(db: &mut Database) -> Result<()> {
     let missing = db.documents_without_embeddings()?;
     if missing.is_empty() {
@@ -298,7 +282,7 @@ fn embed_missing(db: &mut Database) -> Result<()> {
     )?;
     println!();
 
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     let embedding_pairs: Vec<_> = missing
         .iter()
         .zip(embeddings.iter())
@@ -317,7 +301,6 @@ fn embed_missing(db: &mut Database) -> Result<()> {
     Ok(())
 }
 
-/// Checks how fresh the index is and prints a hint if stale.
 fn check_index_freshness(db: &Database) -> Result<()> {
     let indexed_files = db.get_indexed_files()?;
     if indexed_files.is_empty() {
@@ -325,7 +308,7 @@ fn check_index_freshness(db: &Database) -> Result<()> {
     }
 
     let files_with_mtimes = ingest::discover_with_mtimes().unwrap_or_default();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     let mut new_count = 0usize;
     let mut modified_count = 0usize;
 
@@ -343,7 +326,6 @@ fn check_index_freshness(db: &Database) -> Result<()> {
     let total_stale = new_count + modified_count + deleted_count;
 
     if total_stale > 0 {
-        // Find the most recent index time
         let last_indexed = indexed_files.values().max().copied().unwrap_or(0);
         let ago = format_seconds_ago(last_indexed);
         eprintln!(
@@ -355,26 +337,6 @@ fn check_index_freshness(db: &Database) -> Result<()> {
     Ok(())
 }
 
-/// Formats seconds-since-epoch as a human-readable "ago" string.
-#[allow(clippy::cast_possible_wrap)]
-fn format_seconds_ago(epoch_secs: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let delta = now - epoch_secs;
-    if delta < 60 {
-        "just now".to_string()
-    } else if delta < 3600 {
-        format!("{}m ago", delta / 60)
-    } else if delta < 86400 {
-        format!("{}h ago", delta / 3600)
-    } else {
-        format!("{}d ago", delta / 86400)
-    }
-}
-
-/// Determines the effective search mode, falling back to text if embeddings unavailable.
 fn get_effective_mode(db: &Database, mode: SearchMode) -> Result<SearchMode> {
     match mode {
         SearchMode::Hybrid | SearchMode::Semantic => {
@@ -394,7 +356,6 @@ fn get_effective_mode(db: &Database, mode: SearchMode) -> Result<SearchMode> {
     }
 }
 
-/// Executes a search with the given mode and returns results.
 #[allow(clippy::too_many_arguments)]
 fn execute_search(
     db: &Database,
@@ -407,48 +368,32 @@ fn execute_search(
     current_project: Option<&str>,
     current_session: Option<&str>,
 ) -> Result<Vec<SearchResult>> {
-    // Determine if we have filters that can be pushed to SQL
     let has_sql_filters = chunk_kind.is_some() || options.tool.is_some() || options.errors;
+    let fetch_limit = options.limit * 2;
 
-    let results = match mode {
+    let mut results = match mode {
         SearchMode::Text => {
-            let mut results = if has_sql_filters {
+            if has_sql_filters {
                 db.search_fts_filtered(
                     query,
-                    options.limit * 2, // Fetch more for post-filtering
+                    fetch_limit,
                     chunk_kind,
                     options.tool.as_deref(),
                     options.errors,
                 )?
             } else {
-                db.search_fts(query, options.limit * 2)?
-            };
-
-            // Post-filter for options not in SQL (project, session, exclude)
-            if has_filters {
-                results.retain(|r| {
-                    filter_result(
-                        r,
-                        options,
-                        resolved_project,
-                        current_project,
-                        current_session,
-                    )
-                });
-                results.truncate(options.limit);
+                db.search_fts(query, fetch_limit)?
             }
-            results
         }
         SearchMode::Semantic | SearchMode::Hybrid => {
             let embedder = Embedder::new().context("Failed to initialize embedder")?;
             let query_embedding = embedder.embed_query(query)?;
 
-            // Use filtered methods when SQL-pushable filters are active
-            let mut results = if has_sql_filters {
+            if has_sql_filters {
                 if mode == SearchMode::Semantic {
                     db.search_vector_filtered(
                         &query_embedding,
-                        options.limit * 2,
+                        fetch_limit,
                         chunk_kind,
                         options.tool.as_deref(),
                         options.errors,
@@ -457,38 +402,36 @@ fn execute_search(
                     db.search_hybrid_filtered(
                         query,
                         &query_embedding,
-                        options.limit * 2,
+                        fetch_limit,
                         chunk_kind,
                         options.tool.as_deref(),
                         options.errors,
                     )?
                 }
             } else if mode == SearchMode::Semantic {
-                db.search_vector(&query_embedding, options.limit * 2)?
+                db.search_vector(&query_embedding, fetch_limit)?
             } else {
-                db.search_hybrid(query, &query_embedding, options.limit * 2)?
-            };
-
-            // Post-filter for options not in SQL (project, session, exclude)
-            if has_filters {
-                results.retain(|r| {
-                    filter_result(
-                        r,
-                        options,
-                        resolved_project,
-                        current_project,
-                        current_session,
-                    )
-                });
-                results.truncate(options.limit);
+                db.search_hybrid(query, &query_embedding, fetch_limit)?
             }
-            results
         }
     };
+
+    if has_filters {
+        results.retain(|r| {
+            filter::filter_result(
+                r,
+                options,
+                resolved_project,
+                current_project,
+                current_session,
+            )
+        });
+    }
+    results.truncate(options.limit);
+
     Ok(results)
 }
 
-/// Fetches session messages for context display.
 fn fetch_session_context(
     db: &Database,
     results: &[SearchResult],
@@ -504,48 +447,22 @@ fn fetch_session_context(
     sessions
 }
 
-/// Resolves the project filter, expanding `.` to the current working directory.
-fn resolve_project_filter(project: Option<&str>) -> Option<String> {
-    project.map(|p| {
-        if p == "." {
-            std::env::current_dir()
-                .ok()
-                .and_then(|cwd| cwd.to_str().map(String::from))
-                .unwrap_or_else(|| ".".to_string())
-        } else {
-            p.to_string()
-        }
-    })
-}
-
 /// Searches the database and prints results to stdout.
 #[allow(clippy::too_many_lines)]
 pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
-    // Validate query is not empty
     if query.trim().is_empty() {
         anyhow::bail!("Search query cannot be empty");
     }
 
-    let db_path = config::database_path()?;
-    if !db_path.exists() {
-        return Err(Error::DatabaseNotFound { path: db_path }.into());
-    }
-
-    let db = Database::open(&db_path).context("Failed to open database")?;
-
-    // Check index freshness and print a hint if stale
+    let db = open_db()?;
     check_index_freshness(&db)?;
 
     let chunk_kind = options.messages_only.then_some(ChunkKind::Message);
-
-    // Check if running inside Claude Code
     let in_claude_code = std::env::var("CLAUDECODE").is_ok();
 
-    // Apply default exclusions when running inside Claude Code
     let mut options = options.clone();
     let mut showed_exclusion_hint = false;
     if in_claude_code && !options.include_this_project && !options.include_this_session {
-        // Auto-exclude current project and session unless overridden
         if !options.exclude_this_project && !options.include_this_project {
             options.exclude_this_project = true;
             showed_exclusion_hint = true;
@@ -555,36 +472,25 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         }
     }
 
-    // Detect current project and session when needed
     let current_project = if options.exclude_this_project {
-        current_project_name()
+        filter::current_project_name()
     } else {
         None
     };
     let current_session = if options.exclude_this_session || options.this_session {
-        detect_current_session()
+        filter::detect_current_session()
     } else {
         None
     };
 
-    // Resolve `-p .` to current working directory
-    let resolved_project = resolve_project_filter(options.project.as_deref());
-    let has_filters = options.tool.is_some()
-        || options.project.is_some()
-        || options.errors
-        || options.messages_only
-        || options.tools_only
-        || options.since.is_some()
-        || !options.exclude_projects.is_empty()
-        || options.exclude_this_project
-        || options.exclude_this_session
-        || options.this_session;
+    let resolved_project = filter::resolve_project_filter(options.project.as_deref());
+    let has_filters = options.has_filters();
 
     let mut results = if options.regex {
         let mut results = db.search_regex(query, options.limit * 2, options.ignore_case)?;
         if has_filters {
             results.retain(|r| {
-                filter_result(
+                filter::filter_result(
                     r,
                     &options,
                     resolved_project.as_deref(),
@@ -610,15 +516,12 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         )?
     };
 
-    // Reverse results for oldest-first ordering
     if options.oldest_first {
         results.reverse();
     }
 
-    // Normalize scores to 0-1 range for consistent display
     normalize_scores(&mut results);
 
-    // JSON output mode
     if options.json {
         if results.is_empty() {
             println!("[]");
@@ -628,7 +531,6 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         return Ok(());
     }
 
-    // Human-readable output
     if results.is_empty() {
         println!("No matches found for: {query}");
         return Ok(());
@@ -648,7 +550,7 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         } else {
             print_result_header(i + 1, result, options.show_session_id, options.show_scores);
             if show_context {
-                print_result_with_context(result, &options, &session_messages);
+                print_result_with_context(result, options.before, options.after, &session_messages);
             } else {
                 println!(
                     "    \"{}\"\n",
@@ -658,160 +560,11 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         }
     }
 
-    // Show hint about auto-exclusion when running in Claude Code
     if showed_exclusion_hint {
         println!("\nTip: Results from this project/session are auto-excluded.");
         println!("Use --include-this-project or --include-this-session to include them.");
     }
     Ok(())
-}
-
-/// Prints the header for a search result.
-fn print_result_header(
-    num: usize,
-    result: &SearchResult,
-    show_session_id: bool,
-    show_scores: bool,
-) {
-    let project_display = project_name(result.project.as_deref());
-
-    let label = result.display_label();
-    let time_display = format_relative_time(result.timestamp.as_deref());
-    let score_display = if show_scores {
-        format!(" | Score: {:.2}", result.score)
-    } else {
-        String::new()
-    };
-
-    if show_session_id {
-        let session_display = result
-            .session_id
-            .as_ref()
-            .map_or("unknown", |s| &s[..s.len().min(8)]);
-        println!(
-            "[{}] {} | {} | {} | {}{} | sess:{}",
-            num,
-            result.chunk_kind,
-            project_display,
-            label,
-            time_display,
-            score_display,
-            session_display
-        );
-    } else {
-        println!(
-            "[{}] {} | {} | {} | {}{}",
-            num, result.chunk_kind, project_display, label, time_display, score_display
-        );
-    }
-}
-
-/// Prints a compact single-line search result.
-fn print_result_compact(num: usize, result: &SearchResult, show_scores: bool) {
-    let project_display = project_name(result.project.as_deref());
-
-    let label = result.display_label();
-    let time_display = format_relative_time(result.timestamp.as_deref());
-    let session_display = result
-        .session_id
-        .as_ref()
-        .map_or("--------", |s| &s[..s.len().min(8)]);
-    let snippet = truncate_text(&result.content, 60);
-
-    if show_scores {
-        println!(
-            "[{num}] {:.2} | {project_display} | {label} | {time_display} | {session_display} | \"{snippet}\"",
-            result.score
-        );
-    } else {
-        println!(
-            "[{num}] {project_display} | {label} | {time_display} | {session_display} | \"{snippet}\""
-        );
-    }
-}
-
-/// Formats a timestamp as relative time (e.g., "2h ago", "3 days ago").
-fn format_relative_time(timestamp: Option<&str>) -> String {
-    let Some(ts_str) = timestamp else {
-        return "unknown".to_string();
-    };
-
-    let Ok(ts) = DateTime::parse_from_rfc3339(ts_str) else {
-        return "unknown".to_string();
-    };
-
-    let now = Utc::now();
-    let ts_utc = ts.with_timezone(&Utc);
-    let duration = now.signed_duration_since(ts_utc);
-
-    let seconds = duration.num_seconds();
-    if seconds < 0 {
-        return "future".to_string();
-    }
-
-    let minutes = duration.num_minutes();
-    let hours = duration.num_hours();
-    let days = duration.num_days();
-    let weeks = days / 7;
-
-    if seconds < 60 {
-        "just now".to_string()
-    } else if minutes < 60 {
-        format!("{minutes}m ago")
-    } else if hours < 24 {
-        format!("{hours}h ago")
-    } else if days < 7 {
-        format!("{days}d ago")
-    } else if weeks < 8 {
-        format!("{weeks}w ago")
-    } else {
-        // Show date for older items
-        ts_utc.format("%b %d").to_string()
-    }
-}
-
-/// Prints a search result with context messages.
-fn print_result_with_context(
-    result: &SearchResult,
-    options: &SearchOptions,
-    session_messages: &HashMap<String, Vec<SearchResult>>,
-) {
-    let Some(session_id) = &result.session_id else {
-        let snippet = truncate_text(&result.content, RESULT_SNIPPET_LEN);
-        println!("    \"{snippet}\"\n");
-        return;
-    };
-
-    let Some(session_msgs) = session_messages.get(session_id) else {
-        let snippet = truncate_text(&result.content, RESULT_SNIPPET_LEN);
-        println!("    \"{snippet}\"\n");
-        return;
-    };
-
-    // Find the position of this result in the session
-    let match_pos = session_msgs.iter().position(|m| m.id == result.id);
-
-    let Some(pos) = match_pos else {
-        let snippet = truncate_text(&result.content, RESULT_SNIPPET_LEN);
-        println!("    \"{snippet}\"\n");
-        return;
-    };
-
-    // Calculate context range
-    let start = pos.saturating_sub(options.before);
-    let end = (pos + 1 + options.after).min(session_msgs.len());
-
-    // Print context messages
-    for (idx, msg) in session_msgs[start..end].iter().enumerate() {
-        let absolute_idx = start + idx;
-        let is_match = absolute_idx == pos;
-        let prefix = if is_match { ">>>" } else { "   " };
-        let label = msg.display_label();
-
-        let snippet = truncate_text(&msg.content, CONTEXT_SNIPPET_LEN);
-        println!("{prefix} [{label}] \"{snippet}\"");
-    }
-    println!();
 }
 
 /// Prints database status information to stdout.
@@ -825,13 +578,12 @@ pub fn status() -> Result<()> {
         return Ok(());
     }
 
-    let db = Database::open(&db_path).context("Failed to open database")?;
+    let db = open_db()?;
     let doc_count = db.document_count()?;
     let embedding_count = db.embedding_count()?;
     let size = db.file_size().unwrap_or(0);
     let stats = db.status_stats()?;
 
-    // Database Status
     println!("Database Status");
     println!("{}", "─".repeat(15));
     println!("Location:    {}", db_path.display());
@@ -846,7 +598,6 @@ pub fn status() -> Result<()> {
         println!("\n  Note: No embeddings found. Run 'glhf index' to enable semantic search.");
     }
 
-    // Sessions & Projects
     println!("\nSessions & Projects");
     println!("{}", "─".repeat(19));
     println!("Sessions:    {}", format_number(stats.session_count));
@@ -865,7 +616,6 @@ pub fn status() -> Result<()> {
         }
     }
 
-    // Content Breakdown
     println!("\nContent Breakdown");
     println!("{}", "─".repeat(17));
 
@@ -894,7 +644,6 @@ pub fn status() -> Result<()> {
         }
     }
 
-    // Timeline
     if stats.earliest_timestamp.is_some() || stats.latest_timestamp.is_some() {
         println!("\nTimeline");
         println!("{}", "─".repeat(8));
@@ -920,12 +669,7 @@ pub fn status() -> Result<()> {
 
 /// Lists all indexed projects with stats.
 pub fn projects() -> Result<()> {
-    let db_path = config::database_path()?;
-    if !db_path.exists() {
-        return Err(Error::DatabaseNotFound { path: db_path }.into());
-    }
-
-    let db = Database::open(&db_path).context("Failed to open database")?;
+    let db = open_db()?;
     let projects = db.list_projects()?;
 
     if projects.is_empty() {
@@ -940,7 +684,6 @@ pub fn projects() -> Result<()> {
         let display_name = project_name(Some(project.as_str()));
         let time_display = format_relative_time(last_activity.as_deref());
 
-        // Pad the name for alignment
         println!(
             "{:<20} {:>6} docs    last: {}",
             truncate_text(display_name, 20),
@@ -953,18 +696,8 @@ pub fn projects() -> Result<()> {
 }
 
 /// Views a full conversation session by session ID.
-///
-/// Supports partial session ID matching. If multiple sessions match,
-/// lists them for the user to choose from.
 pub fn session(session_id: &str, json: bool, limit: Option<usize>, summary: bool) -> Result<()> {
-    let db_path = config::database_path()?;
-    if !db_path.exists() {
-        return Err(Error::DatabaseNotFound { path: db_path }.into());
-    }
-
-    let db = Database::open(&db_path).context("Failed to open database")?;
-
-    // Find matching sessions
+    let db = open_db()?;
     let matches = db.find_sessions(session_id)?;
 
     if matches.is_empty() {
@@ -972,7 +705,6 @@ pub fn session(session_id: &str, json: bool, limit: Option<usize>, summary: bool
         return Ok(());
     }
 
-    // If multiple matches, list them
     if matches.len() > 1 {
         println!("Multiple sessions match '{session_id}':\n");
         for (id, count, project) in &matches {
@@ -983,7 +715,6 @@ pub fn session(session_id: &str, json: bool, limit: Option<usize>, summary: bool
         return Ok(());
     }
 
-    // Single match - display the session
     let (full_session_id, _, project) = &matches[0];
     let messages = db.get_session_messages(full_session_id)?;
 
@@ -992,13 +723,11 @@ pub fn session(session_id: &str, json: bool, limit: Option<usize>, summary: bool
         return Ok(());
     }
 
-    // Summary mode
     if summary {
         print_session_summary(full_session_id, project.as_deref(), &messages);
         return Ok(());
     }
 
-    // JSON output
     if json {
         let output_messages: Vec<_> = if let Some(n) = limit {
             messages.into_iter().take(n).collect()
@@ -1009,7 +738,6 @@ pub fn session(session_id: &str, json: bool, limit: Option<usize>, summary: bool
         return Ok(());
     }
 
-    // Human-readable output
     let project_display = project_name(project.as_deref());
 
     let display_count = limit.unwrap_or(messages.len()).min(messages.len());
@@ -1042,138 +770,36 @@ pub fn session(session_id: &str, json: bool, limit: Option<usize>, summary: bool
     Ok(())
 }
 
-/// Prints a summary of a session without full content.
-fn print_session_summary(session_id: &str, project: Option<&str>, messages: &[SearchResult]) {
-    use std::collections::HashMap;
-
-    let project_display = project_name(project);
-
-    // Count by chunk kind
-    let mut kind_counts: HashMap<&str, usize> = HashMap::new();
-    for msg in messages {
-        *kind_counts.entry(msg.chunk_kind.as_str()).or_insert(0) += 1;
-    }
-
-    // Count by role (for messages)
-    let mut role_counts: HashMap<&str, usize> = HashMap::new();
-    for msg in messages.iter().filter(|m| m.chunk_kind == "message") {
-        if let Some(role) = &msg.role {
-            *role_counts.entry(role.as_str()).or_insert(0) += 1;
-        }
-    }
-
-    // Count tools used
-    let mut tool_counts: HashMap<&str, usize> = HashMap::new();
-    for msg in messages.iter().filter(|m| m.chunk_kind == "tool_use") {
-        if let Some(tool) = &msg.tool_name {
-            *tool_counts.entry(tool.as_str()).or_insert(0) += 1;
-        }
-    }
-
-    // Calculate duration
-    let first_ts = messages.first().and_then(|m| m.timestamp.as_ref());
-    let last_ts = messages.last().and_then(|m| m.timestamp.as_ref());
-    let duration = match (first_ts, last_ts) {
-        (Some(first), Some(last)) => {
-            if let (Ok(f), Ok(l)) = (
-                chrono::DateTime::parse_from_rfc3339(first),
-                chrono::DateTime::parse_from_rfc3339(last),
-            ) {
-                let dur = l.signed_duration_since(f);
-                format_duration(dur)
-            } else {
-                "unknown".to_string()
-            }
-        }
-        _ => "unknown".to_string(),
-    };
-
-    let started = format_relative_time(first_ts.map(std::string::String::as_str));
-
-    println!("Session: {session_id}");
-    println!("Project: {project_display}");
-    println!("Duration: {duration} (started {started})");
-    println!("Messages: {} total", messages.len());
-
-    // Role breakdown
-    if !role_counts.is_empty() {
-        let mut roles: Vec<_> = role_counts.into_iter().collect();
-        roles.sort_by(|a, b| b.1.cmp(&a.1));
-        for (role, count) in roles {
-            println!("  - {role}: {count}");
-        }
-    }
-
-    // Tool use breakdown
-    if let Some(&tool_use_count) = kind_counts.get("tool_use") {
-        println!("  - tool calls: {tool_use_count}");
-    }
-    if let Some(&tool_result_count) = kind_counts.get("tool_result") {
-        println!("  - tool results: {tool_result_count}");
-    }
-
-    // Top tools
-    if !tool_counts.is_empty() {
-        let mut tools: Vec<_> = tool_counts.into_iter().collect();
-        tools.sort_by(|a, b| b.1.cmp(&a.1));
-        let top_tools: Vec<_> = tools
-            .iter()
-            .take(5)
-            .map(|(t, c)| format!("{t} ({c})"))
-            .collect();
-        println!("Tools used: {}", top_tools.join(", "));
-    }
+struct RankedSession {
+    session_id: String,
+    score: f64,
+    project: Option<String>,
+    timestamp: Option<String>,
+    sample_content: String,
 }
 
-/// Formats a duration in a human-readable way.
-fn format_duration(dur: chrono::Duration) -> String {
-    let total_secs = dur.num_seconds();
-    if total_secs < 60 {
-        format!("{total_secs}s")
-    } else if total_secs < 3600 {
-        format!("{}m", total_secs / 60)
-    } else {
-        let hours = total_secs / 3600;
-        let mins = (total_secs % 3600) / 60;
-        if mins > 0 {
-            format!("{hours}h {mins}m")
-        } else {
-            format!("{hours}h")
-        }
-    }
+struct SessionScoreAgg {
+    total_score: f64,
+    doc_count: usize,
+    project: Option<String>,
+    timestamp: Option<String>,
+    sample_content: String,
 }
 
-/// Ranked session info tuple for related session results.
-type RankedSession = (String, f64, Option<String>, Option<String>, String);
-
-/// Aggregated session score during related session computation.
-type SessionScoreEntry = (f64, usize, Option<String>, Option<String>, String);
-
-/// Minimum raw similarity score to include in related sessions.
-/// Sessions below this threshold are considered unrelated.
 const RELATED_MIN_RAW_SCORE: f64 = 0.1;
-
-/// Minimum normalized score to display (after min-max normalization).
-/// Filters out results that are far below the best match.
 const RELATED_MIN_NORMALIZED_SCORE: f64 = 0.05;
 
 /// Finds sessions related to a given session using embedding similarity.
 pub fn related(session_id: &str, limit: usize) -> Result<()> {
     use crate::db::EMBEDDING_DIM;
 
-    let db_path = config::database_path()?;
-    if !db_path.exists() {
-        return Err(Error::DatabaseNotFound { path: db_path }.into());
-    }
-
-    let db = Database::open(&db_path).context("Failed to open database")?;
+    let db = open_db()?;
 
     if !db.has_embeddings()? {
         println!("No embeddings found. Run 'glhf index' to enable semantic search.");
         return Ok(());
     }
 
-    // Find and validate session
     let Some((full_session_id, project)) = resolve_session(&db, session_id)? else {
         return Ok(());
     };
@@ -1181,28 +807,23 @@ pub fn related(session_id: &str, limit: usize) -> Result<()> {
     let project_display = project_name(project.as_deref());
     println!("Finding sessions related to: {full_session_id} ({project_display})\n");
 
-    // Get session embedding
     let Some(avg_embedding) = compute_session_embedding(&db, &full_session_id, EMBEDDING_DIM)?
     else {
         return Ok(());
     };
 
-    // Find and rank related sessions (fetch extra to allow for filtering)
     let mut ranked = find_related_sessions(&db, &avg_embedding, &full_session_id, limit * 2)?;
 
-    // Filter out sessions with very low raw similarity
-    ranked.retain(|(_id, score, _proj, _ts, _sample)| *score >= RELATED_MIN_RAW_SCORE);
+    ranked.retain(|s| s.score >= RELATED_MIN_RAW_SCORE);
 
     if ranked.is_empty() {
         println!("No related sessions found.");
         return Ok(());
     }
 
-    // Normalize scores to 0-1 range
     normalize_ranked_sessions(&mut ranked);
 
-    // Filter out sessions with very low normalized scores (far from best match)
-    ranked.retain(|(_id, score, _proj, _ts, _sample)| *score >= RELATED_MIN_NORMALIZED_SCORE);
+    ranked.retain(|s| s.score >= RELATED_MIN_NORMALIZED_SCORE);
     ranked.truncate(limit);
 
     if ranked.is_empty() {
@@ -1210,11 +831,25 @@ pub fn related(session_id: &str, limit: usize) -> Result<()> {
         return Ok(());
     }
 
-    print_related_sessions(&ranked);
+    println!("Related sessions:\n");
+    for (i, s) in ranked.iter().enumerate() {
+        let proj_display = project_name(s.project.as_deref());
+        let time_display = format_relative_time(s.timestamp.as_deref());
+        let snippet = truncate_text(&s.sample_content, 60);
+
+        println!(
+            "[{}] {} | {} | {} | Score: {:.2}",
+            i + 1,
+            &s.session_id[..s.session_id.len().min(8)],
+            proj_display,
+            time_display,
+            s.score
+        );
+        println!("    \"{snippet}\"\n");
+    }
     Ok(())
 }
 
-/// Resolves a partial session ID to a full session ID and project.
 fn resolve_session(db: &Database, session_id: &str) -> Result<Option<(String, Option<String>)>> {
     let matches = db.find_sessions(session_id)?;
 
@@ -1239,7 +874,6 @@ fn resolve_session(db: &Database, session_id: &str) -> Result<Option<(String, Op
     Ok(Some((full_id, project)))
 }
 
-/// Computes an averaged embedding for a session by sampling its documents.
 fn compute_session_embedding(
     db: &Database,
     session_id: &str,
@@ -1251,7 +885,6 @@ fn compute_session_embedding(
         return Ok(None);
     }
 
-    // Sample if too many docs
     let sample_ids: Vec<String> = if doc_ids.len() > 100 {
         let step = doc_ids.len() / 100;
         doc_ids.into_iter().step_by(step).take(100).collect()
@@ -1268,79 +901,57 @@ fn compute_session_embedding(
     Ok(Some(average_embeddings(&embeddings, dim)))
 }
 
-/// Finds sessions related to the given embedding, excluding the source session.
 fn find_related_sessions(
     db: &Database,
     embedding: &[f32],
     exclude_session: &str,
     limit: usize,
 ) -> Result<Vec<RankedSession>> {
-    use std::collections::HashMap;
-
     let similar_docs =
         db.search_vector_excluding_session(embedding, exclude_session, limit * 20)?;
     if similar_docs.is_empty() {
         return Ok(vec![]);
     }
 
-    // Aggregate scores by session
-    let mut scores: HashMap<String, SessionScoreEntry> = HashMap::new();
+    let mut scores: HashMap<String, SessionScoreAgg> = HashMap::new();
 
     for doc in &similar_docs {
         if let Some(sess_id) = &doc.session_id {
-            let entry = scores.entry(sess_id.clone()).or_insert((
-                0.0,
-                0,
-                doc.project.clone(),
-                doc.timestamp.clone(),
-                doc.content.clone(),
-            ));
-            entry.0 += doc.score;
-            entry.1 += 1;
+            let entry = scores.entry(sess_id.clone()).or_insert(SessionScoreAgg {
+                total_score: 0.0,
+                doc_count: 0,
+                project: doc.project.clone(),
+                timestamp: doc.timestamp.clone(),
+                sample_content: doc.content.clone(),
+            });
+            entry.total_score += doc.score;
+            entry.doc_count += 1;
         }
     }
 
-    // Convert to ranked list
     let mut ranked: Vec<RankedSession> = scores
         .into_iter()
-        .map(|(id, (total, count, proj, ts, content))| {
-            (id, total / count as f64, proj, ts, content)
+        .map(|(id, agg)| RankedSession {
+            session_id: id,
+            score: agg.total_score / agg.doc_count as f64,
+            project: agg.project,
+            timestamp: agg.timestamp,
+            sample_content: agg.sample_content,
         })
         .collect();
 
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     ranked.truncate(limit);
     Ok(ranked)
 }
 
-/// Prints the list of related sessions.
-fn print_related_sessions(sessions: &[RankedSession]) {
-    println!("Related sessions:\n");
-    for (i, (sess_id, score, proj, timestamp, sample)) in sessions.iter().enumerate() {
-        let proj_display = project_name(proj.as_deref());
-        let time_display = format_relative_time(timestamp.as_deref());
-        let snippet = truncate_text(sample, 60);
-
-        println!(
-            "[{}] {} | {} | {} | Score: {:.2}",
-            i + 1,
-            &sess_id[..sess_id.len().min(8)],
-            proj_display,
-            time_display,
-            score
-        );
-        println!("    \"{snippet}\"\n");
-    }
-}
-
 /// Shows recent sessions across all projects.
 pub fn recent(limit: usize, project_filter: Option<&str>) -> Result<()> {
-    let db_path = config::database_path()?;
-    if !db_path.exists() {
-        return Err(Error::DatabaseNotFound { path: db_path }.into());
-    }
-
-    let db = Database::open(&db_path).context("Failed to open database")?;
+    let db = open_db()?;
     let sessions = db.get_recent_sessions(limit, project_filter)?;
 
     if sessions.is_empty() {
@@ -1369,110 +980,6 @@ pub fn recent(limit: usize, project_filter: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Extracts a display name from an encoded project path.
-///
-/// The encoded path looks like `-Users-trevor-Projects-foo` or `-Users-trevor--claude`.
-/// We extract a reasonable display name by:
-/// 1. Looking for `-Projects-` and taking everything after it
-/// 2. Looking for `--` (hidden dir marker) and taking everything after it
-/// 3. Falling back to the last hyphen-separated segment
-fn project_name(project: Option<&str>) -> &str {
-    let Some(p) = project else {
-        return "unknown";
-    };
-
-    // If it's already a decoded path (for backwards compat), use last segment
-    if p.contains('/') {
-        return p.rsplit('/').next().unwrap_or(p);
-    }
-
-    // Look for -Projects- marker (most common case)
-    // Use rfind to handle edge case of multiple -Projects- in path
-    if let Some(idx) = p.rfind("-Projects-") {
-        let after = &p[idx + "-Projects-".len()..];
-        if !after.is_empty() {
-            return after;
-        }
-    }
-
-    // Look for -- marker (hidden directories like .claude)
-    if let Some(idx) = p.rfind("--") {
-        let after = &p[idx + 2..];
-        if !after.is_empty() {
-            return after;
-        }
-    }
-
-    // Fallback: take last segment after final hyphen (if path-like)
-    if p.starts_with('-') {
-        if let Some(idx) = p.rfind('-') {
-            let after = &p[idx + 1..];
-            if !after.is_empty() {
-                return after;
-            }
-        }
-    }
-
-    p
-}
-
-/// Returns the current project name based on the working directory.
-fn current_project_name() -> Option<String> {
-    std::env::current_dir()
-        .ok()
-        .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
-}
-
-/// Detects the current Claude Code session ID.
-///
-/// Uses two-tier detection:
-/// 1. Primary: Check `CLAUDE_SESSION_ID` env var (user can set via `SessionStart` hook)
-/// 2. Fallback: Find most recently modified non-agent JSONL in project directory
-#[allow(clippy::case_sensitive_file_extension_comparisons)]
-fn detect_current_session() -> Option<String> {
-    // Primary: Check env var (set by user's SessionStart hook)
-    if let Ok(session_id) = std::env::var("CLAUDE_SESSION_ID") {
-        if !session_id.is_empty() {
-            return Some(session_id);
-        }
-    }
-
-    // Fallback: Most recently modified session file in current project
-    let project_dir = current_project_dir()?;
-    std::fs::read_dir(project_dir)
-        .ok()?
-        .filter_map(std::result::Result::ok)
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            name.ends_with(".jsonl") && !name.starts_with("agent-")
-        })
-        .filter_map(|e| {
-            let modified = e.metadata().ok()?.modified().ok()?;
-            Some((e, modified))
-        })
-        .max_by_key(|(_, modified)| *modified)
-        .map(|(e, _)| {
-            e.file_name()
-                .to_string_lossy()
-                .trim_end_matches(".jsonl")
-                .to_string()
-        })
-}
-
-/// Returns the Claude projects directory for the current working directory.
-fn current_project_dir() -> Option<std::path::PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    let encoded = encode_project_path(&cwd);
-    let projects_dir = config::projects_dir().ok()?;
-    Some(projects_dir.join(encoded))
-}
-
-/// Encodes a path the way Claude Code does: `/` -> `-`, `/.` -> `--`
-fn encode_project_path(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace("/.", "--").replace('/', "-")
-}
-
-/// Averages a list of embeddings into a single embedding.
 fn average_embeddings(embeddings: &[Vec<f32>], dim: usize) -> Vec<f32> {
     let mut avg = vec![0.0_f32; dim];
     let count = embeddings.len() as f32;
@@ -1490,186 +997,6 @@ fn average_embeddings(embeddings: &[Vec<f32>], dim: usize) -> Vec<f32> {
     }
 
     avg
-}
-
-/// Prints a single message in session view format.
-fn print_session_message(msg: &SearchResult) {
-    let time = format_relative_time(msg.timestamp.as_deref());
-    let label = msg.display_label();
-
-    // Color/style header based on type
-    let header = format!("[{}] {} | {}", label, msg.chunk_kind, time);
-    println!("\n{header}");
-    println!("{}", "─".repeat(40));
-
-    // Print content (truncate very long content, respecting char boundaries)
-    let content = if msg.content.len() > 2000 {
-        let mut end = 2000;
-        while end > 0 && !msg.content.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!(
-            "{}...\n[truncated, {} total chars]",
-            &msg.content[..end],
-            msg.content.len()
-        )
-    } else {
-        msg.content.clone()
-    };
-    println!("{content}");
-}
-
-/// Filters a search result based on options.
-///
-/// The `resolved_project` parameter is the project filter after resolving `.`
-/// to the current working directory. The `current_project` and `current_session`
-/// are lazily computed by the caller when needed.
-fn filter_result(
-    result: &SearchResult,
-    options: &SearchOptions,
-    resolved_project: Option<&str>,
-    current_project: Option<&str>,
-    current_session: Option<&str>,
-) -> bool {
-    // Filter by messages_only
-    if options.messages_only && result.chunk_kind != "message" {
-        return false;
-    }
-
-    // Filter by tools_only
-    if options.tools_only && result.chunk_kind == "message" {
-        return false;
-    }
-
-    // Filter by tool name
-    if let Some(ref tool) = options.tool {
-        match &result.tool_name {
-            Some(name) if name.eq_ignore_ascii_case(tool) => {}
-            _ => return false,
-        }
-    }
-
-    // Filter by project name (case-insensitive substring match)
-    if let Some(project_filter) = resolved_project {
-        let filter_lower = project_filter.to_lowercase();
-        match &result.project {
-            Some(project) if project.to_lowercase().contains(&filter_lower) => {}
-            _ => return false,
-        }
-    }
-
-    // Exclude specific projects
-    if !options.exclude_projects.is_empty() {
-        let result_project = project_name(result.project.as_deref());
-        for excluded in &options.exclude_projects {
-            if result_project
-                .to_lowercase()
-                .contains(&excluded.to_lowercase())
-            {
-                return false;
-            }
-        }
-    }
-
-    // Exclude current project
-    if options.exclude_this_project {
-        if let Some(cur_proj) = current_project {
-            let result_project = project_name(result.project.as_deref());
-            if result_project.eq_ignore_ascii_case(cur_proj) {
-                return false;
-            }
-        }
-    }
-
-    // Filter to current session only
-    if options.this_session {
-        if let Some(cur_sess) = current_session {
-            match &result.session_id {
-                Some(sess) if sess.starts_with(cur_sess) || cur_sess.starts_with(sess) => {}
-                _ => return false,
-            }
-        }
-    }
-
-    // Exclude current session
-    if options.exclude_this_session {
-        if let Some(cur_sess) = current_session {
-            if let Some(ref sess) = result.session_id {
-                if sess.starts_with(cur_sess) || cur_sess.starts_with(sess) {
-                    return false;
-                }
-            }
-        }
-    }
-
-    // Filter by errors
-    if options.errors && result.is_error != Some(true) {
-        return false;
-    }
-
-    // Filter by timestamp (--since)
-    if let Some(since) = options.since {
-        let ts_ok = result
-            .timestamp
-            .as_ref()
-            .and_then(|ts_str| DateTime::parse_from_rfc3339(ts_str).ok())
-            .is_some_and(|ts| ts >= since);
-        if !ts_ok {
-            return false;
-        }
-    }
-
-    true
-}
-
-/// Formats a number with comma separators (e.g., 12847 -> "12,847").
-fn format_number(n: i64) -> String {
-    let s = n.to_string();
-    // Handle negative numbers: skip the '-' for digit grouping
-    let (prefix, digits) = if let Some(stripped) = s.strip_prefix('-') {
-        ("-", stripped)
-    } else {
-        ("", s.as_str())
-    };
-    let mut result = String::with_capacity(s.len() + digits.len() / 3);
-    result.push_str(prefix);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result
-}
-
-/// Formats a timestamp as a date string (e.g., "2025-01-15").
-fn format_date(timestamp: Option<&str>) -> String {
-    let Some(ts_str) = timestamp else {
-        return "unknown".to_string();
-    };
-
-    let Ok(ts) = DateTime::parse_from_rfc3339(ts_str) else {
-        return "unknown".to_string();
-    };
-
-    ts.format("%Y-%m-%d").to_string()
-}
-
-/// Format bytes as human-readable size.
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
 }
 
 #[cfg(test)]
@@ -1742,11 +1069,9 @@ mod tests {
                 .map(|(i, &s)| make_result(&format!("r{i}"), s))
                 .collect();
 
-            // Record original ordering of pairs
             let original_scores: Vec<f64> = results.iter().map(|r| r.score).collect();
             normalize_scores(&mut results);
 
-            // For every pair, relative ordering should be preserved
             for i in 0..results.len() {
                 for j in (i + 1)..results.len() {
                     if original_scores[i] > original_scores[j] {
