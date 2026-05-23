@@ -9,9 +9,6 @@ use std::collections::HashMap;
 /// Maximum characters for result snippets.
 pub const RESULT_SNIPPET_LEN: usize = 200;
 
-/// Maximum characters for context message snippets.
-pub const CONTEXT_SNIPPET_LEN: usize = 150;
-
 /// Formats a timestamp as relative time (e.g., "2h ago", "3d ago").
 pub fn format_relative_time(timestamp: Option<&str>) -> String {
     let Some(ts_str) = timestamp else {
@@ -71,7 +68,7 @@ pub fn format_seconds_ago(epoch_secs: i64) -> String {
 }
 
 /// Formats a duration in a human-readable way.
-pub fn format_duration(dur: chrono::Duration) -> String {
+fn format_duration(dur: chrono::Duration) -> String {
     let total_secs = dur.num_seconds();
     if total_secs < 60 {
         format!("{total_secs}s")
@@ -239,49 +236,6 @@ pub fn print_result_compact(num: usize, result: &SearchResult, show_scores: bool
             "[{num}] {project_display} | {label} | {time_display} | {session_display} | \"{snippet}\""
         );
     }
-}
-
-/// Prints a search result with context messages.
-#[allow(clippy::implicit_hasher)]
-pub fn print_result_with_context(
-    result: &SearchResult,
-    before: usize,
-    after: usize,
-    session_messages: &HashMap<String, Vec<SearchResult>>,
-) {
-    let Some(session_id) = &result.session_id else {
-        let snippet = truncate_text(&result.content, RESULT_SNIPPET_LEN);
-        println!("    \"{snippet}\"\n");
-        return;
-    };
-
-    let Some(session_msgs) = session_messages.get(session_id) else {
-        let snippet = truncate_text(&result.content, RESULT_SNIPPET_LEN);
-        println!("    \"{snippet}\"\n");
-        return;
-    };
-
-    let match_pos = session_msgs.iter().position(|m| m.id == result.id);
-
-    let Some(pos) = match_pos else {
-        let snippet = truncate_text(&result.content, RESULT_SNIPPET_LEN);
-        println!("    \"{snippet}\"\n");
-        return;
-    };
-
-    let start = pos.saturating_sub(before);
-    let end = (pos + 1 + after).min(session_msgs.len());
-
-    for (idx, msg) in session_msgs[start..end].iter().enumerate() {
-        let absolute_idx = start + idx;
-        let is_match = absolute_idx == pos;
-        let prefix = if is_match { ">>>" } else { "   " };
-        let label = msg.display_label();
-
-        let snippet = truncate_text(&msg.content, CONTEXT_SNIPPET_LEN);
-        println!("{prefix} [{label}] \"{snippet}\"");
-    }
-    println!();
 }
 
 /// Prints a single message in session view format.

@@ -264,45 +264,6 @@ fn test_tool_use_indexing() {
 }
 
 #[test]
-fn test_regex_search() {
-    let env = TestEnv::new();
-    let db_path = env.index_dir.join("test_regex.db");
-
-    let docs = vec![
-        Document::new(
-            ChunkKind::Message,
-            "Error: file not found".to_string(),
-            PathBuf::from("/test/1.jsonl"),
-        ),
-        Document::new(
-            ChunkKind::Message,
-            "Warning: deprecated function".to_string(),
-            PathBuf::from("/test/2.jsonl"),
-        ),
-        Document::new(
-            ChunkKind::Message,
-            "Success: operation completed".to_string(),
-            PathBuf::from("/test/3.jsonl"),
-        ),
-    ];
-
-    let mut db = Database::open(&db_path).expect("Failed to create database");
-    db.insert_documents(&docs)
-        .expect("Failed to insert documents");
-
-    // Regex search for Error or Warning
-    let results = db
-        .search_regex("Error|Warning", 10, false)
-        .expect("Search failed");
-    assert_eq!(results.len(), 2);
-
-    // Case-insensitive regex
-    let results = db.search_regex("error", 10, true).expect("Search failed");
-    assert_eq!(results.len(), 1);
-    assert!(results[0].content.contains("Error"));
-}
-
-#[test]
 fn test_filtered_search() {
     let env = TestEnv::new();
     let db_path = env.index_dir.join("test_filter.db");
@@ -676,46 +637,6 @@ fn test_status_stats() {
     assert_eq!(*stats.chunk_counts.get("tool_use").unwrap_or(&0), 1);
     assert_eq!(*stats.role_counts.get("user").unwrap_or(&0), 1);
     assert_eq!(*stats.role_counts.get("assistant").unwrap_or(&0), 1);
-}
-
-#[test]
-fn test_list_projects() {
-    let env = TestEnv::new();
-    let db_path = env.index_dir.join("projects.db");
-
-    let docs = vec![
-        Document::new(
-            ChunkKind::Message,
-            "doc in project a".to_string(),
-            PathBuf::from("/test/1.jsonl"),
-        )
-        .with_project(Some("project-a".to_string())),
-        Document::new(
-            ChunkKind::Message,
-            "doc in project b".to_string(),
-            PathBuf::from("/test/2.jsonl"),
-        )
-        .with_project(Some("project-b".to_string())),
-        Document::new(
-            ChunkKind::Message,
-            "another in project a".to_string(),
-            PathBuf::from("/test/3.jsonl"),
-        )
-        .with_project(Some("project-a".to_string())),
-    ];
-
-    let mut db = Database::open(&db_path).unwrap();
-    db.insert_documents(&docs).unwrap();
-
-    let projects = db.list_projects().unwrap();
-    assert_eq!(projects.len(), 2);
-
-    // project-a should have 2 docs
-    let proj_a = projects
-        .iter()
-        .find(|(name, _, _)| name == "project-a")
-        .unwrap();
-    assert_eq!(proj_a.1, 2);
 }
 
 #[test]

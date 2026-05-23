@@ -221,44 +221,6 @@ impl Database {
         Ok(())
     }
 
-    /// Clears all data from the database.
-    pub fn clear(&self) -> Result<()> {
-        self.conn.execute_batch(
-            r"
-            DELETE FROM documents_vec;
-            DELETE FROM documents;
-            DELETE FROM documents_fts;
-            ",
-        )?;
-        Ok(())
-    }
-
-    /// Inserts a document into the database.
-    pub fn insert_document(&self, doc: &Document) -> Result<()> {
-        self.conn.execute(
-            r"
-            INSERT OR REPLACE INTO documents
-            (id, chunk_kind, content, project, session_id, role, tool_name, tool_id, tool_input, is_error, timestamp, source_path)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-            ",
-            params![
-                doc.id,
-                doc.chunk_kind.as_str(),
-                doc.content,
-                doc.project,
-                doc.session_id,
-                doc.role,
-                doc.tool_name,
-                doc.tool_id,
-                doc.tool_input,
-                doc.is_error,
-                doc.timestamp.map(|t| t.to_rfc3339()),
-                doc.source_path.to_string_lossy(),
-            ],
-        )?;
-        Ok(())
-    }
-
     /// Inserts multiple documents in a savepoint (nestable within outer transactions).
     pub fn insert_documents(&mut self, docs: &[Document]) -> Result<()> {
         let tx = self.conn.savepoint()?;
@@ -293,6 +255,7 @@ impl Database {
     }
 
     /// Inserts an embedding for a document.
+    #[cfg(any(test, fuzzing))]
     pub fn insert_embedding(&self, doc_id: &str, embedding: &[f32]) -> Result<()> {
         let embedding_bytes = embedding_to_bytes(embedding);
         self.conn.execute(
@@ -651,41 +614,6 @@ impl Database {
         Ok(results)
     }
 
-    /// Regex search (full table scan).
-    pub fn search_regex(
-        &self,
-        pattern: &str,
-        limit: usize,
-        ignore_case: bool,
-    ) -> Result<Vec<SearchResult>> {
-        let regex = if ignore_case {
-            regex::Regex::new(&format!("(?i){pattern}"))?
-        } else {
-            regex::Regex::new(pattern)?
-        };
-
-        let sql = format!("SELECT {DOC_COLUMNS} FROM documents d");
-        let mut stmt = self.conn.prepare(&sql)?;
-
-        let mut results = Vec::new();
-        let mut rows = stmt.query([])?;
-
-        while let Some(row) = rows.next()? {
-            let content: String = row.get(2)?;
-            if regex.is_match(&content) {
-                let mut result = row_to_result_fts(row, false)?;
-                result.score = 1.0;
-                results.push(result);
-
-                if results.len() >= limit {
-                    break;
-                }
-            }
-        }
-
-        Ok(results)
-    }
-
     /// Returns the file size of the database in bytes.
     pub fn file_size(&self) -> Result<u64> {
         let path: String = self
@@ -798,27 +726,6 @@ impl Database {
         })
     }
 
-    /// Lists all indexed projects with document counts and last activity.
-    pub fn list_projects(&self) -> Result<Vec<(String, i64, Option<String>)>> {
-        let mut stmt = self.conn.prepare(
-            r"
-            SELECT project, COUNT(*) as doc_count, MAX(timestamp) as last_activity
-            FROM documents
-            WHERE project IS NOT NULL
-            GROUP BY project
-            ORDER BY last_activity DESC
-            ",
-        )?;
-
-        let results = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(results)
-    }
-
     /// Gets recent sessions, optionally filtered by project.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn get_recent_sessions(
@@ -875,88 +782,27 @@ impl Database {
         Ok(results)
     }
 
-    /// Gets document IDs for a session (for embedding lookup).
-    pub fn get_session_doc_ids(&self, session_id: &str) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            r"
-            SELECT id FROM documents
-            WHERE session_id = ?1
-            ",
+    #[cfg(any(test, fuzzing))]
+    pub fn clear(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "DELETE FROM documents_vec; DELETE FROM documents; DELETE FROM documents_fts;",
         )?;
-
-        let results = stmt
-            .query_map(params![session_id], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(results)
+        Ok(())
     }
 
-    /// Gets embeddings for a list of document IDs.
-    pub fn get_embeddings_for_docs(&self, doc_ids: &[String]) -> Result<Vec<Vec<f32>>> {
-        if doc_ids.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let placeholders: Vec<_> = (1..=doc_ids.len()).map(|i| format!("?{i}")).collect();
-        let sql = format!(
-            "SELECT embedding FROM documents_vec WHERE id IN ({})",
-            placeholders.join(", ")
-        );
-
-        let mut stmt = self.conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> = doc_ids
-            .iter()
-            .map(|id| id as &dyn rusqlite::ToSql)
-            .collect();
-
-        let results = stmt
-            .query_map(params.as_slice(), |row| {
-                let blob: Vec<u8> = row.get(0)?;
-                Ok(bytes_to_embedding(&blob))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(results)
-    }
-
-    /// Searches for documents similar to an averaged embedding, excluding a session.
-    pub fn search_vector_excluding_session(
-        &self,
-        query_embedding: &[f32],
-        exclude_session: &str,
-        limit: usize,
-    ) -> Result<Vec<SearchResult>> {
-        let embedding_bytes = embedding_to_bytes(query_embedding);
-
-        // Fetch more and filter, since we can't filter in the vec query.
-        // Cap at 4096 which is sqlite-vec's maximum k value.
-        let fetch_limit = (limit * 10).min(4096);
-
-        let sql = format!(
-            "SELECT {VEC_DOC_COLUMNS}
-             FROM documents_vec v
-             JOIN documents d ON d.id = v.id
-             WHERE embedding MATCH ?1 AND k = ?2
-             ORDER BY distance"
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-
-        let mut results = Vec::new();
-        let rows = stmt.query_map(params![embedding_bytes, fetch_limit as i64], |row| {
-            row_to_result_vec(row)
-        })?;
-
-        for row in rows {
-            let result = row?;
-            if result.session_id.as_deref() != Some(exclude_session) {
-                results.push(result);
-                if results.len() >= limit {
-                    break;
-                }
-            }
-        }
-
-        Ok(results)
+    #[cfg(any(test, fuzzing))]
+    pub fn insert_document(&self, doc: &Document) -> Result<()> {
+        self.conn.execute(
+            r"INSERT OR REPLACE INTO documents
+            (id, chunk_kind, content, project, session_id, role, tool_name, tool_id, tool_input, is_error, timestamp, source_path)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                doc.id, doc.chunk_kind.as_str(), doc.content, doc.project, doc.session_id,
+                doc.role, doc.tool_name, doc.tool_id, doc.tool_input, doc.is_error,
+                doc.timestamp.map(|t| t.to_rfc3339()), doc.source_path.to_string_lossy(),
+            ],
+        )?;
+        Ok(())
     }
 }
 
@@ -1006,14 +852,6 @@ fn row_to_result_vec(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchResult> 
         is_error: row.get(10)?,
         timestamp: row.get(11)?,
     })
-}
-
-/// Converts bytes back to an f32 embedding vector.
-fn bytes_to_embedding(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect()
 }
 
 /// Converts an f32 slice to bytes for sqlite-vec.
@@ -1396,26 +1234,6 @@ mod tests {
             let w_short = compute_fts_weight(&short);
             let w_long = compute_fts_weight(&long);
             prop_assert!(w_short >= w_long, "Short query weight {w_short} < long query weight {w_long}");
-        }
-
-        #[test]
-        fn proptest_embedding_roundtrip(values in prop::collection::vec(-1.0f32..1.0f32, 0..100)) {
-            let bytes = embedding_to_bytes(&values);
-            let recovered = bytes_to_embedding(&bytes);
-            prop_assert_eq!(values.len(), recovered.len());
-            for (orig, rec) in values.iter().zip(recovered.iter()) {
-                prop_assert_eq!(orig.to_bits(), rec.to_bits());
-            }
-        }
-
-        #[test]
-        fn proptest_bytes_roundtrip(bytes in prop::collection::vec(0u8..=255u8, 0..400usize).prop_filter(
-            "length must be multiple of 4",
-            |v| v.len() % 4 == 0
-        )) {
-            let embedding = bytes_to_embedding(&bytes);
-            let recovered_bytes = embedding_to_bytes(&embedding);
-            prop_assert_eq!(bytes, recovered_bytes);
         }
 
         #[test]

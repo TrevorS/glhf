@@ -2,14 +2,12 @@
 
 use crate::config;
 use crate::db::{Database, SearchResult};
-use crate::document::ChunkKind;
 use crate::embed::Embedder;
 use crate::error::Error;
-use crate::filter;
 use crate::format::{
     format_date, format_number, format_relative_time, format_seconds_ago, format_size,
-    print_result_compact, print_result_header, print_result_with_context, print_session_message,
-    print_session_summary, project_name, RESULT_SNIPPET_LEN,
+    print_result_compact, print_result_header, print_session_message, print_session_summary,
+    project_name, RESULT_SNIPPET_LEN,
 };
 use crate::ingest;
 use crate::utils::truncate_text;
@@ -30,7 +28,6 @@ fn open_db() -> Result<Database> {
     Database::open(&db_path).context("Failed to open database")
 }
 
-/// Normalizes scores to 0-1 range within the result set.
 fn normalize_scores(results: &mut [SearchResult]) {
     if results.is_empty() {
         return;
@@ -56,81 +53,21 @@ fn normalize_scores(results: &mut [SearchResult]) {
     }
 }
 
-fn normalize_ranked_sessions(sessions: &mut [RankedSession]) {
-    if sessions.is_empty() {
-        return;
-    }
-
-    let min = sessions
-        .iter()
-        .map(|s| s.score)
-        .fold(f64::INFINITY, f64::min);
-    let max = sessions
-        .iter()
-        .map(|s| s.score)
-        .fold(f64::NEG_INFINITY, f64::max);
-
-    if (max - min).abs() < f64::EPSILON {
-        for s in sessions.iter_mut() {
-            s.score = 1.0;
-        }
-    } else {
-        for s in sessions.iter_mut() {
-            s.score = (s.score - min) / (max - min);
-        }
-    }
-}
-
-/// Search mode for queries.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum SearchMode {
-    #[default]
-    Hybrid,
-    Text,
-    Semantic,
-}
-
 /// Options for search command.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default)]
 pub struct SearchOptions {
     pub limit: usize,
-    pub mode: SearchMode,
-    pub regex: bool,
-    pub ignore_case: bool,
-    pub before: usize,
-    pub after: usize,
     pub tool: Option<String>,
     pub project: Option<String>,
     pub errors: bool,
-    pub messages_only: bool,
-    pub tools_only: bool,
+    pub since: Option<DateTime<Utc>>,
     pub json: bool,
     pub compact: bool,
-    pub show_session_id: bool,
-    pub since: Option<DateTime<Utc>>,
-    pub show_scores: bool,
-    pub exclude_projects: Vec<String>,
-    pub exclude_this_project: bool,
-    pub include_this_project: bool,
-    pub exclude_this_session: bool,
-    pub include_this_session: bool,
-    pub this_session: bool,
-    pub oldest_first: bool,
 }
 
 impl SearchOptions {
-    pub fn has_filters(&self) -> bool {
-        self.tool.is_some()
-            || self.project.is_some()
-            || self.errors
-            || self.messages_only
-            || self.tools_only
-            || self.since.is_some()
-            || !self.exclude_projects.is_empty()
-            || self.exclude_this_project
-            || self.exclude_this_session
-            || self.this_session
+    fn has_filters(&self) -> bool {
+        self.tool.is_some() || self.project.is_some() || self.errors || self.since.is_some()
     }
 }
 
@@ -337,118 +274,58 @@ fn check_index_freshness(db: &Database) -> Result<()> {
     Ok(())
 }
 
-fn get_effective_mode(db: &Database, mode: SearchMode) -> Result<SearchMode> {
-    match mode {
-        SearchMode::Hybrid | SearchMode::Semantic => {
-            if db.has_embeddings()? {
-                Ok(mode)
-            } else {
-                if mode == SearchMode::Semantic {
-                    println!("Warning: No embeddings found. Falling back to text search.");
-                    println!(
-                        "Run 'glhf index' without --skip-embeddings to enable semantic search.\n"
-                    );
-                }
-                Ok(SearchMode::Text)
-            }
+fn resolve_project_filter(project: Option<&str>) -> Option<String> {
+    project.map(|p| {
+        if p == "." {
+            std::env::current_dir()
+                .ok()
+                .and_then(|cwd| cwd.to_str().map(String::from))
+                .unwrap_or_else(|| ".".to_string())
+        } else {
+            p.to_string()
         }
-        SearchMode::Text => Ok(mode),
-    }
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn execute_search(
-    db: &Database,
-    query: &str,
+fn filter_result(
+    result: &SearchResult,
     options: &SearchOptions,
-    mode: SearchMode,
-    chunk_kind: Option<ChunkKind>,
-    has_filters: bool,
     resolved_project: Option<&str>,
-    current_project: Option<&str>,
-    current_session: Option<&str>,
-) -> Result<Vec<SearchResult>> {
-    let has_sql_filters = chunk_kind.is_some() || options.tool.is_some() || options.errors;
-    let fetch_limit = options.limit * 2;
-
-    let mut results = match mode {
-        SearchMode::Text => {
-            if has_sql_filters {
-                db.search_fts_filtered(
-                    query,
-                    fetch_limit,
-                    chunk_kind,
-                    options.tool.as_deref(),
-                    options.errors,
-                )?
-            } else {
-                db.search_fts(query, fetch_limit)?
-            }
-        }
-        SearchMode::Semantic | SearchMode::Hybrid => {
-            let embedder = Embedder::new().context("Failed to initialize embedder")?;
-            let query_embedding = embedder.embed_query(query)?;
-
-            if has_sql_filters {
-                if mode == SearchMode::Semantic {
-                    db.search_vector_filtered(
-                        &query_embedding,
-                        fetch_limit,
-                        chunk_kind,
-                        options.tool.as_deref(),
-                        options.errors,
-                    )?
-                } else {
-                    db.search_hybrid_filtered(
-                        query,
-                        &query_embedding,
-                        fetch_limit,
-                        chunk_kind,
-                        options.tool.as_deref(),
-                        options.errors,
-                    )?
-                }
-            } else if mode == SearchMode::Semantic {
-                db.search_vector(&query_embedding, fetch_limit)?
-            } else {
-                db.search_hybrid(query, &query_embedding, fetch_limit)?
-            }
-        }
-    };
-
-    if has_filters {
-        results.retain(|r| {
-            filter::filter_result(
-                r,
-                options,
-                resolved_project,
-                current_project,
-                current_session,
-            )
-        });
-    }
-    results.truncate(options.limit);
-
-    Ok(results)
-}
-
-fn fetch_session_context(
-    db: &Database,
-    results: &[SearchResult],
-) -> HashMap<String, Vec<SearchResult>> {
-    let mut sessions = HashMap::new();
-    for result in results {
-        if let Some(session_id) = &result.session_id {
-            sessions
-                .entry(session_id.clone())
-                .or_insert_with(|| db.get_session_messages(session_id).unwrap_or_default());
+) -> bool {
+    if let Some(ref tool) = options.tool {
+        match &result.tool_name {
+            Some(name) if name.eq_ignore_ascii_case(tool) => {}
+            _ => return false,
         }
     }
-    sessions
+
+    if let Some(project_filter) = resolved_project {
+        let filter_lower = project_filter.to_lowercase();
+        match &result.project {
+            Some(project) if project.to_lowercase().contains(&filter_lower) => {}
+            _ => return false,
+        }
+    }
+
+    if options.errors && result.is_error != Some(true) {
+        return false;
+    }
+
+    if let Some(since) = options.since {
+        let ts_ok = result
+            .timestamp
+            .as_ref()
+            .and_then(|ts_str| DateTime::parse_from_rfc3339(ts_str).ok())
+            .is_some_and(|ts| ts >= since);
+        if !ts_ok {
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Searches the database and prints results to stdout.
-#[allow(clippy::too_many_lines)]
 pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
     if query.trim().is_empty() {
         anyhow::bail!("Search query cannot be empty");
@@ -457,68 +334,44 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
     let db = open_db()?;
     check_index_freshness(&db)?;
 
-    let chunk_kind = options.messages_only.then_some(ChunkKind::Message);
-    let in_claude_code = std::env::var("CLAUDECODE").is_ok();
-
-    let mut options = options.clone();
-    let mut showed_exclusion_hint = false;
-    if in_claude_code && !options.include_this_project && !options.include_this_session {
-        if !options.exclude_this_project && !options.include_this_project {
-            options.exclude_this_project = true;
-            showed_exclusion_hint = true;
-        }
-        if !options.exclude_this_session && !options.include_this_session && !options.this_session {
-            options.exclude_this_session = true;
-        }
-    }
-
-    let current_project = if options.exclude_this_project {
-        filter::current_project_name()
-    } else {
-        None
-    };
-    let current_session = if options.exclude_this_session || options.this_session {
-        filter::detect_current_session()
-    } else {
-        None
-    };
-
-    let resolved_project = filter::resolve_project_filter(options.project.as_deref());
+    let resolved_project = resolve_project_filter(options.project.as_deref());
     let has_filters = options.has_filters();
 
-    let mut results = if options.regex {
-        let mut results = db.search_regex(query, options.limit * 2, options.ignore_case)?;
-        if has_filters {
-            results.retain(|r| {
-                filter::filter_result(
-                    r,
-                    &options,
-                    resolved_project.as_deref(),
-                    current_project.as_deref(),
-                    current_session.as_deref(),
-                )
-            });
+    let has_sql_filters = options.tool.is_some() || options.errors;
+    let fetch_limit = options.limit * 2;
+
+    let mut results = if db.has_embeddings()? {
+        let embedder = Embedder::new().context("Failed to initialize embedder")?;
+        let query_embedding = embedder.embed_query(query)?;
+
+        if has_sql_filters {
+            db.search_hybrid_filtered(
+                query,
+                &query_embedding,
+                fetch_limit,
+                None,
+                options.tool.as_deref(),
+                options.errors,
+            )?
+        } else {
+            db.search_hybrid(query, &query_embedding, fetch_limit)?
         }
-        results.truncate(options.limit);
-        results
-    } else {
-        let effective_mode = get_effective_mode(&db, options.mode)?;
-        execute_search(
-            &db,
+    } else if has_sql_filters {
+        db.search_fts_filtered(
             query,
-            &options,
-            effective_mode,
-            chunk_kind,
-            has_filters,
-            resolved_project.as_deref(),
-            current_project.as_deref(),
-            current_session.as_deref(),
+            fetch_limit,
+            None,
+            options.tool.as_deref(),
+            options.errors,
         )?
+    } else {
+        db.search_fts(query, fetch_limit)?
     };
 
-    if options.oldest_first {
-        results.reverse();
+    if has_filters {
+        results.retain(|r| filter_result(r, options, resolved_project.as_deref()));
     }
+    results.truncate(options.limit);
 
     normalize_scores(&mut results);
 
@@ -536,34 +389,19 @@ pub fn search(query: &str, options: &SearchOptions) -> Result<()> {
         return Ok(());
     }
 
-    let show_context = options.before > 0 || options.after > 0;
-    let session_messages = if show_context {
-        fetch_session_context(&db, &results)
-    } else {
-        HashMap::new()
-    };
-
     println!("Found {} results:\n", results.len());
     for (i, result) in results.iter().enumerate() {
         if options.compact {
-            print_result_compact(i + 1, result, options.show_scores);
+            print_result_compact(i + 1, result, false);
         } else {
-            print_result_header(i + 1, result, options.show_session_id, options.show_scores);
-            if show_context {
-                print_result_with_context(result, options.before, options.after, &session_messages);
-            } else {
-                println!(
-                    "    \"{}\"\n",
-                    truncate_text(&result.content, RESULT_SNIPPET_LEN)
-                );
-            }
+            print_result_header(i + 1, result, false, false);
+            println!(
+                "    \"{}\"\n",
+                truncate_text(&result.content, RESULT_SNIPPET_LEN)
+            );
         }
     }
 
-    if showed_exclusion_hint {
-        println!("\nTip: Results from this project/session are auto-excluded.");
-        println!("Use --include-this-project or --include-this-session to include them.");
-    }
     Ok(())
 }
 
@@ -667,34 +505,6 @@ pub fn status() -> Result<()> {
     Ok(())
 }
 
-/// Lists all indexed projects with stats.
-pub fn projects() -> Result<()> {
-    let db = open_db()?;
-    let projects = db.list_projects()?;
-
-    if projects.is_empty() {
-        println!("No projects found.");
-        return Ok(());
-    }
-
-    println!("Projects ({} total)", projects.len());
-    println!("{}", "─".repeat(50));
-
-    for (project, doc_count, last_activity) in &projects {
-        let display_name = project_name(Some(project.as_str()));
-        let time_display = format_relative_time(last_activity.as_deref());
-
-        println!(
-            "{:<20} {:>6} docs    last: {}",
-            truncate_text(display_name, 20),
-            doc_count,
-            time_display
-        );
-    }
-
-    Ok(())
-}
-
 /// Views a full conversation session by session ID.
 pub fn session(session_id: &str, json: bool, limit: Option<usize>, summary: bool) -> Result<()> {
     let db = open_db()?;
@@ -770,185 +580,6 @@ pub fn session(session_id: &str, json: bool, limit: Option<usize>, summary: bool
     Ok(())
 }
 
-struct RankedSession {
-    session_id: String,
-    score: f64,
-    project: Option<String>,
-    timestamp: Option<String>,
-    sample_content: String,
-}
-
-struct SessionScoreAgg {
-    total_score: f64,
-    doc_count: usize,
-    project: Option<String>,
-    timestamp: Option<String>,
-    sample_content: String,
-}
-
-const RELATED_MIN_RAW_SCORE: f64 = 0.1;
-const RELATED_MIN_NORMALIZED_SCORE: f64 = 0.05;
-
-/// Finds sessions related to a given session using embedding similarity.
-pub fn related(session_id: &str, limit: usize) -> Result<()> {
-    use crate::db::EMBEDDING_DIM;
-
-    let db = open_db()?;
-
-    if !db.has_embeddings()? {
-        println!("No embeddings found. Run 'glhf index' to enable semantic search.");
-        return Ok(());
-    }
-
-    let Some((full_session_id, project)) = resolve_session(&db, session_id)? else {
-        return Ok(());
-    };
-
-    let project_display = project_name(project.as_deref());
-    println!("Finding sessions related to: {full_session_id} ({project_display})\n");
-
-    let Some(avg_embedding) = compute_session_embedding(&db, &full_session_id, EMBEDDING_DIM)?
-    else {
-        return Ok(());
-    };
-
-    let mut ranked = find_related_sessions(&db, &avg_embedding, &full_session_id, limit * 2)?;
-
-    ranked.retain(|s| s.score >= RELATED_MIN_RAW_SCORE);
-
-    if ranked.is_empty() {
-        println!("No related sessions found.");
-        return Ok(());
-    }
-
-    normalize_ranked_sessions(&mut ranked);
-
-    ranked.retain(|s| s.score >= RELATED_MIN_NORMALIZED_SCORE);
-    ranked.truncate(limit);
-
-    if ranked.is_empty() {
-        println!("No related sessions found.");
-        return Ok(());
-    }
-
-    println!("Related sessions:\n");
-    for (i, s) in ranked.iter().enumerate() {
-        let proj_display = project_name(s.project.as_deref());
-        let time_display = format_relative_time(s.timestamp.as_deref());
-        let snippet = truncate_text(&s.sample_content, 60);
-
-        println!(
-            "[{}] {} | {} | {} | Score: {:.2}",
-            i + 1,
-            &s.session_id[..s.session_id.len().min(8)],
-            proj_display,
-            time_display,
-            s.score
-        );
-        println!("    \"{snippet}\"\n");
-    }
-    Ok(())
-}
-
-fn resolve_session(db: &Database, session_id: &str) -> Result<Option<(String, Option<String>)>> {
-    let matches = db.find_sessions(session_id)?;
-
-    if matches.is_empty() {
-        println!("No sessions found matching: {session_id}");
-        return Ok(None);
-    }
-
-    if matches.len() > 1 {
-        println!("Multiple sessions match '{session_id}':\n");
-        for (id, count, project) in &matches {
-            println!(
-                "  {id} ({count} items) - {}",
-                project_name(project.as_deref())
-            );
-        }
-        println!("\nSpecify a more complete session ID.");
-        return Ok(None);
-    }
-
-    let (full_id, _, project) = matches.into_iter().next().unwrap();
-    Ok(Some((full_id, project)))
-}
-
-fn compute_session_embedding(
-    db: &Database,
-    session_id: &str,
-    dim: usize,
-) -> Result<Option<Vec<f32>>> {
-    let doc_ids = db.get_session_doc_ids(session_id)?;
-    if doc_ids.is_empty() {
-        println!("Session has no documents.");
-        return Ok(None);
-    }
-
-    let sample_ids: Vec<String> = if doc_ids.len() > 100 {
-        let step = doc_ids.len() / 100;
-        doc_ids.into_iter().step_by(step).take(100).collect()
-    } else {
-        doc_ids
-    };
-
-    let embeddings = db.get_embeddings_for_docs(&sample_ids)?;
-    if embeddings.is_empty() {
-        println!("No embeddings found for this session.");
-        return Ok(None);
-    }
-
-    Ok(Some(average_embeddings(&embeddings, dim)))
-}
-
-fn find_related_sessions(
-    db: &Database,
-    embedding: &[f32],
-    exclude_session: &str,
-    limit: usize,
-) -> Result<Vec<RankedSession>> {
-    let similar_docs =
-        db.search_vector_excluding_session(embedding, exclude_session, limit * 20)?;
-    if similar_docs.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let mut scores: HashMap<String, SessionScoreAgg> = HashMap::new();
-
-    for doc in &similar_docs {
-        if let Some(sess_id) = &doc.session_id {
-            let entry = scores.entry(sess_id.clone()).or_insert(SessionScoreAgg {
-                total_score: 0.0,
-                doc_count: 0,
-                project: doc.project.clone(),
-                timestamp: doc.timestamp.clone(),
-                sample_content: doc.content.clone(),
-            });
-            entry.total_score += doc.score;
-            entry.doc_count += 1;
-        }
-    }
-
-    let mut ranked: Vec<RankedSession> = scores
-        .into_iter()
-        .map(|(id, agg)| RankedSession {
-            session_id: id,
-            score: agg.total_score / agg.doc_count as f64,
-            project: agg.project,
-            timestamp: agg.timestamp,
-            sample_content: agg.sample_content,
-        })
-        .collect();
-
-    ranked.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    ranked.truncate(limit);
-    Ok(ranked)
-}
-
 /// Shows recent sessions across all projects.
 pub fn recent(limit: usize, project_filter: Option<&str>) -> Result<()> {
     let db = open_db()?;
@@ -978,25 +609,6 @@ pub fn recent(limit: usize, project_filter: Option<&str>) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn average_embeddings(embeddings: &[Vec<f32>], dim: usize) -> Vec<f32> {
-    let mut avg = vec![0.0_f32; dim];
-    let count = embeddings.len() as f32;
-
-    for embedding in embeddings {
-        for (i, val) in embedding.iter().enumerate() {
-            if i < dim {
-                avg[i] += val;
-            }
-        }
-    }
-
-    for val in &mut avg {
-        *val /= count;
-    }
-
-    avg
 }
 
 #[cfg(test)]

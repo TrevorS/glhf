@@ -53,7 +53,6 @@ pub mod db;
 pub mod document;
 pub mod embed;
 pub mod error;
-pub mod filter;
 pub mod format;
 pub mod ingest;
 pub mod utils;

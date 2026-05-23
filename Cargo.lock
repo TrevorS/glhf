@@ -696,7 +696,6 @@ dependencies = [
  "hex",
  "model2vec-rs",
  "proptest",
- "regex",
  "rusqlite",
  "serde",
  "serde_json",

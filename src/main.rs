@@ -1,13 +1,11 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
-use clap::{Parser, Subcommand, ValueEnum};
-use glhf::commands::{SearchMode, SearchOptions};
+use clap::{Parser, Subcommand};
+use glhf::commands::SearchOptions;
 
-/// Parses a duration string like "1h", "2d", "1w" or an ISO date into a UTC cutoff timestamp.
 fn parse_since(s: &str) -> Result<DateTime<Utc>, String> {
     let s = s.trim();
 
-    // Try relative duration first: 1h, 2d, 3w, etc.
     if let Some(num_str) = s.strip_suffix('h') {
         let hours: i64 = num_str.parse().map_err(|_| format!("Invalid hours: {s}"))?;
         return Ok(Utc::now() - Duration::hours(hours));
@@ -21,7 +19,6 @@ fn parse_since(s: &str) -> Result<DateTime<Utc>, String> {
         return Ok(Utc::now() - Duration::weeks(weeks));
     }
 
-    // Try ISO date: 2024-12-01
     if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
         return Ok(date.and_hms_opt(0, 0, 0).unwrap().and_utc());
     }
@@ -36,28 +33,6 @@ fn parse_since(s: &str) -> Result<DateTime<Utc>, String> {
 struct Cli {
     #[command(subcommand)]
     command: Commands,
-}
-
-/// Search mode for queries.
-#[derive(Debug, Clone, Copy, Default, ValueEnum)]
-enum CliSearchMode {
-    /// Hybrid search combining text and semantic (default)
-    #[default]
-    Hybrid,
-    /// Full-text search only (FTS5)
-    Text,
-    /// Semantic/vector search only
-    Semantic,
-}
-
-impl From<CliSearchMode> for SearchMode {
-    fn from(mode: CliSearchMode) -> Self {
-        match mode {
-            CliSearchMode::Hybrid => SearchMode::Hybrid,
-            CliSearchMode::Text => SearchMode::Text,
-            CliSearchMode::Semantic => SearchMode::Semantic,
-        }
-    }
 }
 
 #[derive(Subcommand)]
@@ -81,45 +56,20 @@ EXAMPLES:
     glhf search 'git' -t Bash --compact        Find git commands you ran
     glhf search 'bug' -p myapp --since 1w      Filter by project and time
     glhf search 'failed' --errors --compact    Find errors only
-    glhf search 'refactor' --messages-only     Human/AI messages only
 ")]
     Search {
-        /// The search query (or regex pattern with -e)
+        /// The search query
         query: String,
 
         /// Maximum number of results to return
         #[arg(short, long, default_value = "10")]
         limit: usize,
 
-        /// Search mode: hybrid, text, or semantic
-        #[arg(short, long, default_value = "hybrid")]
-        mode: CliSearchMode,
-
-        /// Interpret the query as a regular expression (like grep -e)
-        #[arg(short = 'e', long = "regex", conflicts_with = "mode")]
-        regex: bool,
-
-        /// Case-insensitive search (like grep -i)
-        #[arg(short = 'i', long = "ignore-case")]
-        ignore_case: bool,
-
-        /// Show N messages after each match (like grep -A)
-        #[arg(short = 'A', long = "after-context", value_name = "NUM")]
-        after: Option<usize>,
-
-        /// Show N messages before each match (like grep -B)
-        #[arg(short = 'B', long = "before-context", value_name = "NUM")]
-        before: Option<usize>,
-
-        /// Show N messages before and after each match (like grep -C)
-        #[arg(short = 'C', long = "context", value_name = "NUM")]
-        context: Option<usize>,
-
         /// Filter by tool name (e.g., Bash, Read, Edit, Grep)
         #[arg(short = 't', long = "tool", value_name = "NAME")]
         tool: Option<String>,
 
-        /// Filter by project name (substring match, case-insensitive)
+        /// Filter by project name (substring match, use '.' for current)
         #[arg(short = 'p', long = "project", value_name = "NAME")]
         project: Option<String>,
 
@@ -127,13 +77,9 @@ EXAMPLES:
         #[arg(long = "errors")]
         errors: bool,
 
-        /// Only show messages (exclude tool calls)
-        #[arg(long = "messages-only", conflicts_with_all = ["tools_only", "tool"])]
-        messages_only: bool,
-
-        /// Only show tool calls (exclude messages)
-        #[arg(long = "tools-only", conflicts_with = "messages_only")]
-        tools_only: bool,
+        /// Only show results since a given time (e.g., 1h, 2d, 1w, or 2024-12-01)
+        #[arg(long = "since", value_name = "DURATION", value_parser = parse_since)]
+        since: Option<DateTime<Utc>>,
 
         /// Output results as JSON (machine-readable)
         #[arg(long = "json")]
@@ -142,53 +88,10 @@ EXAMPLES:
         /// Compact output format (one line per result)
         #[arg(long = "compact")]
         compact: bool,
-
-        /// Show session IDs in results (for jumping to full session)
-        #[arg(long = "show-session-id")]
-        show_session_id: bool,
-
-        /// Show relevance scores (for debugging/tuning)
-        #[arg(long = "scores")]
-        scores: bool,
-
-        /// Only show results since a given time (e.g., 1h, 2d, 1w, or 2024-12-01)
-        #[arg(long = "since", value_name = "DURATION", value_parser = parse_since)]
-        since: Option<DateTime<Utc>>,
-
-        /// Exclude projects by name (repeatable)
-        #[arg(short = 'X', long = "exclude-project", value_name = "NAME")]
-        exclude_projects: Vec<String>,
-
-        /// Exclude results from current project (default when CLAUDECODE=1)
-        #[arg(long = "exclude-this-project")]
-        exclude_this_project: bool,
-
-        /// Include results from current project (overrides default exclusion)
-        #[arg(long = "include-this-project", conflicts_with = "exclude_this_project")]
-        include_this_project: bool,
-
-        /// Exclude results from current session (default when CLAUDECODE=1)
-        #[arg(long = "exclude-this-session")]
-        exclude_this_session: bool,
-
-        /// Include results from current session (overrides default exclusion)
-        #[arg(long = "include-this-session", conflicts_with = "exclude_this_session")]
-        include_this_session: bool,
-
-        /// Filter to current session only
-        #[arg(long = "this-session", conflicts_with_all = ["exclude_this_session", "include_this_session"])]
-        this_session: bool,
-
-        /// Show oldest results first
-        #[arg(long = "oldest", alias = "reverse")]
-        oldest_first: bool,
     },
 
     /// Show index status and statistics
     Status,
-
-    /// List all indexed projects
-    Projects,
 
     /// View a full conversation session
     #[command(after_help = "\
@@ -212,21 +115,6 @@ EXAMPLES:
         /// Show session summary without full content
         #[arg(long)]
         summary: bool,
-    },
-
-    /// Find sessions related to a given session
-    #[command(after_help = "\
-EXAMPLES:
-    glhf related abc123                  Find similar past work
-    glhf related abc123 --limit 10       More related sessions
-")]
-    Related {
-        /// Session ID to find related sessions for
-        session_id: String,
-
-        /// Maximum number of related sessions to show
-        #[arg(short, long, default_value = "5")]
-        limit: usize,
     },
 
     /// Show recent sessions
@@ -260,62 +148,26 @@ fn main() -> Result<()> {
         Commands::Search {
             query,
             limit,
-            mode,
-            regex,
-            ignore_case,
-            after,
-            before,
-            context,
             tool,
             project,
             errors,
-            messages_only,
-            tools_only,
+            since,
             json,
             compact,
-            show_session_id,
-            scores,
-            since,
-            exclude_projects,
-            exclude_this_project,
-            include_this_project,
-            exclude_this_session,
-            include_this_session,
-            this_session,
-            oldest_first,
         } => {
             let options = SearchOptions {
                 limit,
-                mode: mode.into(),
-                regex,
-                ignore_case,
-                before: context.or(before).unwrap_or(0),
-                after: context.or(after).unwrap_or(0),
                 tool,
                 project,
                 errors,
-                messages_only,
-                tools_only,
+                since,
                 json,
                 compact,
-                show_session_id,
-                since,
-                show_scores: scores,
-                exclude_projects,
-                exclude_this_project,
-                include_this_project,
-                exclude_this_session,
-                include_this_session,
-                this_session,
-                oldest_first,
             };
             glhf::commands::search(&query, &options)?;
         }
         Commands::Status => {
             glhf::commands::status()?;
-        }
-        Commands::Projects => {
-            glhf::commands::projects()?;
         }
         Commands::Session {
             session_id,
@@ -324,9 +176,6 @@ fn main() -> Result<()> {
             summary,
         } => {
             glhf::commands::session(&session_id, json, limit, summary)?;
-        }
-        Commands::Related { session_id, limit } => {
-            glhf::commands::related(&session_id, limit)?;
         }
         Commands::Recent { limit, project } => {
             glhf::commands::recent(limit, project.as_deref())?;
@@ -383,7 +232,6 @@ mod tests {
 
         #[test]
         fn proptest_parse_since_random_never_panics(input in "\\PC{0,50}") {
-            // Should never panic, just Ok or Err
             let _ = parse_since(&input);
         }
     }
