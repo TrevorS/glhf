@@ -25,3 +25,4 @@ fuzz/artifacts/
 # Proptest regression files
 **/proptest-regressions/
 *.proptest-regressions
+.fastembed_cache/

@@ -3,6 +3,8 @@
 //! This module provides unified storage for documents, full-text search via FTS5,
 //! and vector similarity search via sqlite-vec.
 
+#![allow(clippy::cast_possible_wrap)]
+
 use crate::document::{ChunkKind, DisplayLabel, Document};
 use crate::Result;
 use rusqlite::{params, Connection};
@@ -11,7 +13,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Once;
 
-/// Embedding dimension for Potion-retrieval-32M model.
+/// Embedding dimension for Potion-base-32M model.
 pub const EMBEDDING_DIM: usize = 512;
 
 /// Ensures sqlite-vec is registered only once per process.
@@ -219,40 +221,37 @@ impl Database {
         Ok(())
     }
 
-    /// Clears all data from the database.
-    pub fn clear(&self) -> Result<()> {
+    /// Drops FTS triggers for bulk loading. Call `rebuild_fts` after inserting.
+    pub fn drop_fts_triggers(&self) -> Result<()> {
         self.conn.execute_batch(
-            r"
-            DELETE FROM documents_vec;
-            DELETE FROM documents;
-            DELETE FROM documents_fts;
-            ",
+            "DROP TRIGGER IF EXISTS documents_ai;
+             DROP TRIGGER IF EXISTS documents_ad;
+             DROP TRIGGER IF EXISTS documents_au;",
         )?;
         Ok(())
     }
 
-    /// Inserts a document into the database.
-    pub fn insert_document(&self, doc: &Document) -> Result<()> {
+    /// Rebuilds the FTS index from the documents table and recreates triggers.
+    pub fn rebuild_fts(&self) -> Result<()> {
+        // FTS5 'rebuild' command re-reads all content from the content table
         self.conn.execute(
-            r"
-            INSERT OR REPLACE INTO documents
-            (id, chunk_kind, content, project, session_id, role, tool_name, tool_id, tool_input, is_error, timestamp, source_path)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-            ",
-            params![
-                doc.id,
-                doc.chunk_kind.as_str(),
-                doc.content,
-                doc.project,
-                doc.session_id,
-                doc.role,
-                doc.tool_name,
-                doc.tool_id,
-                doc.tool_input,
-                doc.is_error,
-                doc.timestamp.map(|t| t.to_rfc3339()),
-                doc.source_path.to_string_lossy(),
-            ],
+            "INSERT INTO documents_fts(documents_fts) VALUES('rebuild')",
+            [],
+        )?;
+
+        self.conn.execute_batch(
+            r"CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+                  INSERT INTO documents_fts(rowid, content) VALUES (NEW.rowid, NEW.content);
+              END;
+
+              CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
+                  INSERT INTO documents_fts(documents_fts, rowid, content) VALUES('delete', OLD.rowid, OLD.content);
+              END;
+
+              CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
+                  INSERT INTO documents_fts(documents_fts, rowid, content) VALUES('delete', OLD.rowid, OLD.content);
+                  INSERT INTO documents_fts(rowid, content) VALUES (NEW.rowid, NEW.content);
+              END;",
         )?;
         Ok(())
     }
@@ -291,6 +290,7 @@ impl Database {
     }
 
     /// Inserts an embedding for a document.
+    #[cfg(any(test, fuzzing))]
     pub fn insert_embedding(&self, doc_id: &str, embedding: &[f32]) -> Result<()> {
         let embedding_bytes = embedding_to_bytes(embedding);
         self.conn.execute(
@@ -331,7 +331,6 @@ impl Database {
     }
 
     /// Updates the index metadata for a file.
-    #[allow(clippy::cast_possible_wrap)]
     pub fn upsert_file_meta(
         &self,
         source_path: &str,
@@ -400,7 +399,6 @@ impl Database {
     /// Uses implicit AND by default, but falls back to OR for multi-word
     /// queries that return no results. This helps with common phrases like
     /// "how to" that might not appear together in indexed content.
-    #[allow(clippy::cast_possible_wrap)]
     pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let escaped_query = escape_fts_query(query);
         if escaped_query.is_empty() {
@@ -419,37 +417,20 @@ impl Database {
     }
 
     /// Execute an FTS5 query and return results.
-    #[allow(clippy::cast_possible_wrap)]
     fn execute_fts_query(&self, escaped_query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        let mut stmt = self.conn.prepare(
-            r"
-            SELECT d.id, d.chunk_kind, d.content, d.project, d.session_id,
-                   d.role, d.tool_name, d.tool_id, d.tool_input, d.is_error, d.timestamp,
-                   bm25(documents_fts) as score
-            FROM documents_fts f
-            JOIN documents d ON d.rowid = f.rowid
-            WHERE documents_fts MATCH ?1
-            ORDER BY score
-            LIMIT ?2
-            ",
-        )?;
+        let sql = format!(
+            "SELECT {DOC_COLUMNS}, bm25(documents_fts) as score
+             FROM documents_fts f
+             JOIN documents d ON d.rowid = f.rowid
+             WHERE documents_fts MATCH ?1
+             ORDER BY score
+             LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
 
         let results = stmt
             .query_map(params![escaped_query, limit as i64], |row| {
-                Ok(SearchResult {
-                    id: row.get(0)?,
-                    chunk_kind: row.get(1)?,
-                    content: row.get(2)?,
-                    project: row.get(3)?,
-                    session_id: row.get(4)?,
-                    role: row.get(5)?,
-                    tool_name: row.get(6)?,
-                    tool_id: row.get(7)?,
-                    tool_input: row.get(8)?,
-                    is_error: row.get(9)?,
-                    timestamp: row.get(10)?,
-                    score: row.get::<_, f64>(11)?.abs(), // BM25 returns negative scores
-                })
+                row_to_result_fts(row, true)
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
@@ -457,7 +438,6 @@ impl Database {
     }
 
     /// Full-text search with filters.
-    #[allow(clippy::cast_possible_wrap)]
     pub fn search_fts_filtered(
         &self,
         query: &str,
@@ -470,118 +450,63 @@ impl Database {
         if escaped_query.is_empty() {
             return Ok(vec![]);
         }
-        let mut sql = String::from(
-            r"
-            SELECT d.id, d.chunk_kind, d.content, d.project, d.session_id,
-                   d.role, d.tool_name, d.tool_id, d.tool_input, d.is_error, d.timestamp,
-                   bm25(documents_fts) as score
-            FROM documents_fts f
-            JOIN documents d ON d.rowid = f.rowid
-            WHERE documents_fts MATCH ?1
-            ",
+        let mut sql = format!(
+            "SELECT {DOC_COLUMNS}, bm25(documents_fts) as score
+             FROM documents_fts f
+             JOIN documents d ON d.rowid = f.rowid
+             WHERE documents_fts MATCH ?1"
         );
 
-        let mut param_idx = 2;
-        if chunk_kind.is_some() {
-            let _ = write!(sql, " AND d.chunk_kind = ?{param_idx}");
-            param_idx += 1;
-        }
-        if tool_name.is_some() {
-            let _ = write!(sql, " AND LOWER(d.tool_name) = LOWER(?{param_idx})");
-            param_idx += 1;
-        }
-        if errors_only {
-            let _ = write!(sql, " AND d.is_error = ?{param_idx}");
-        }
-
-        sql.push_str(" ORDER BY score LIMIT ?");
-
-        let mut stmt = self.conn.prepare(&sql)?;
-
-        // Build dynamic parameters
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(escaped_query)];
-
-        if let Some(ck) = chunk_kind {
-            params_vec.push(Box::new(ck.as_str().to_string()));
-        }
-        if let Some(tn) = tool_name {
-            params_vec.push(Box::new(tn.to_string()));
-        }
-        if errors_only {
-            params_vec.push(Box::new(1_i32));
-        }
+        append_filter_clauses(
+            &mut sql,
+            &mut params_vec,
+            2,
+            chunk_kind,
+            tool_name,
+            errors_only,
+        );
+        sql.push_str(" ORDER BY score LIMIT ?");
         params_vec.push(Box::new(limit as i64));
 
+        let mut stmt = self.conn.prepare(&sql)?;
         let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(AsRef::as_ref).collect();
 
         let results = stmt
-            .query_map(params_refs.as_slice(), |row| {
-                Ok(SearchResult {
-                    id: row.get(0)?,
-                    chunk_kind: row.get(1)?,
-                    content: row.get(2)?,
-                    project: row.get(3)?,
-                    session_id: row.get(4)?,
-                    role: row.get(5)?,
-                    tool_name: row.get(6)?,
-                    tool_id: row.get(7)?,
-                    tool_input: row.get(8)?,
-                    is_error: row.get(9)?,
-                    timestamp: row.get(10)?,
-                    score: row.get::<_, f64>(11)?.abs(),
-                })
-            })?
+            .query_map(params_refs.as_slice(), |row| row_to_result_fts(row, true))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(results)
     }
 
     /// Vector similarity search using sqlite-vec.
-    #[allow(clippy::cast_possible_wrap)]
     pub fn search_vector(
         &self,
         query_embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<SearchResult>> {
         let embedding_bytes = embedding_to_bytes(query_embedding);
-
-        let mut stmt = self.conn.prepare(
-            r"
-            SELECT v.id, v.distance, d.chunk_kind, d.content, d.project, d.session_id,
-                   d.role, d.tool_name, d.tool_id, d.tool_input, d.is_error, d.timestamp
-            FROM documents_vec v
-            JOIN documents d ON d.id = v.id
-            WHERE embedding MATCH ?1 AND k = ?2
-            ORDER BY distance
-            ",
-        )?;
+        let sql = format!(
+            "SELECT {VEC_DOC_COLUMNS}
+             FROM documents_vec v
+             JOIN documents d ON d.id = v.id
+             WHERE embedding MATCH ?1 AND k = ?2
+             ORDER BY distance"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
 
         let results = stmt
             .query_map(params![embedding_bytes, limit as i64], |row| {
-                Ok(SearchResult {
-                    id: row.get(0)?,
-                    score: 1.0 - row.get::<_, f64>(1)?, // Convert distance to similarity
-                    chunk_kind: row.get(2)?,
-                    content: row.get(3)?,
-                    project: row.get(4)?,
-                    session_id: row.get(5)?,
-                    role: row.get(6)?,
-                    tool_name: row.get(7)?,
-                    tool_id: row.get(8)?,
-                    tool_input: row.get(9)?,
-                    is_error: row.get(10)?,
-                    timestamp: row.get(11)?,
-                })
+                row_to_result_vec(row)
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(results)
     }
 
-    /// Hybrid search combining FTS5 and vector search with RRF fusion.
+    /// Hybrid search combining FTS5 and vector search with convex combination.
     ///
-    /// Short queries (< 20 chars) favor text search since semantic models
-    /// need more context. Longer queries get equal weighting.
+    /// Uses min-max normalized scores with alpha=0.75 (75% FTS, 25% vector).
     pub fn search_hybrid(
         &self,
         query: &str,
@@ -595,15 +520,11 @@ impl Database {
         let vec_results = self.search_vector(query_embedding, fetch_limit)?;
 
         // Compute FTS weight based on query length
-        let fts_weight = compute_fts_weight(query);
-
-        // RRF fusion with query-appropriate weighting
-        let fused = rrf_fusion_weighted(&fts_results, &vec_results, limit, fts_weight);
+        let fused = cc_fusion(&fts_results, &vec_results, limit);
         Ok(fused)
     }
 
     /// Vector similarity search with filters.
-    #[allow(clippy::cast_possible_wrap)]
     pub fn search_vector_filtered(
         &self,
         query_embedding: &[f32],
@@ -615,81 +536,40 @@ impl Database {
         let embedding_bytes = embedding_to_bytes(query_embedding);
 
         // Fetch more candidates since sqlite-vec's k limits before we can filter.
-        // Use a high multiplier because messages are a small fraction of all documents.
         // Cap at 4096 which is sqlite-vec's maximum k value.
         let fetch_k = (limit * 50).min(4096);
 
-        let mut sql = String::from(
-            r"
-            SELECT v.id, v.distance, d.chunk_kind, d.content, d.project, d.session_id,
-                   d.role, d.tool_name, d.tool_id, d.tool_input, d.is_error, d.timestamp
-            FROM documents_vec v
-            JOIN documents d ON d.id = v.id
-            WHERE embedding MATCH ?1 AND k = ?2
-            ",
+        let mut sql = format!(
+            "SELECT {VEC_DOC_COLUMNS}
+             FROM documents_vec v
+             JOIN documents d ON d.id = v.id
+             WHERE embedding MATCH ?1 AND k = ?2"
         );
 
-        // Build dynamic WHERE clauses
-        let mut param_idx = 3;
-        if chunk_kind.is_some() {
-            let _ = write!(sql, " AND d.chunk_kind = ?{param_idx}");
-            param_idx += 1;
-        }
-        if tool_name.is_some() {
-            let _ = write!(sql, " AND LOWER(d.tool_name) = LOWER(?{param_idx})");
-            param_idx += 1;
-        }
-        if errors_only {
-            let _ = write!(sql, " AND d.is_error = ?{param_idx}");
-        }
-
-        sql.push_str(" ORDER BY v.distance LIMIT ?");
-
-        let mut stmt = self.conn.prepare(&sql)?;
-
-        // Build dynamic parameters
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> =
             vec![Box::new(embedding_bytes), Box::new(fetch_k as i64)];
-
-        if let Some(ck) = chunk_kind {
-            params_vec.push(Box::new(ck.as_str().to_string()));
-        }
-        if let Some(tn) = tool_name {
-            params_vec.push(Box::new(tn.to_string()));
-        }
-        if errors_only {
-            params_vec.push(Box::new(1_i32));
-        }
+        append_filter_clauses(
+            &mut sql,
+            &mut params_vec,
+            3,
+            chunk_kind,
+            tool_name,
+            errors_only,
+        );
+        sql.push_str(" ORDER BY v.distance LIMIT ?");
         params_vec.push(Box::new(limit as i64));
 
+        let mut stmt = self.conn.prepare(&sql)?;
         let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(AsRef::as_ref).collect();
 
         let results = stmt
-            .query_map(params_refs.as_slice(), |row| {
-                Ok(SearchResult {
-                    id: row.get(0)?,
-                    score: 1.0 - row.get::<_, f64>(1)?, // Convert distance to similarity
-                    chunk_kind: row.get(2)?,
-                    content: row.get(3)?,
-                    project: row.get(4)?,
-                    session_id: row.get(5)?,
-                    role: row.get(6)?,
-                    tool_name: row.get(7)?,
-                    tool_id: row.get(8)?,
-                    tool_input: row.get(9)?,
-                    is_error: row.get(10)?,
-                    timestamp: row.get(11)?,
-                })
-            })?
+            .query_map(params_refs.as_slice(), row_to_result_vec)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(results)
     }
 
-    /// Hybrid search with filters, combining FTS5 and vector search with RRF fusion.
-    ///
-    /// Short queries (< 20 chars) favor text search since semantic models
-    /// need more context. Longer queries get equal weighting.
+    /// Hybrid search with filters, combining FTS5 and vector search with convex combination.
     pub fn search_hybrid_filtered(
         &self,
         query: &str,
@@ -713,10 +593,7 @@ impl Database {
         )?;
 
         // Compute FTS weight based on query length
-        let fts_weight = compute_fts_weight(query);
-
-        // RRF fusion with query-appropriate weighting
-        let fused = rrf_fusion_weighted(&fts_results, &vec_results, limit, fts_weight);
+        let fused = cc_fusion(&fts_results, &vec_results, limit);
         Ok(fused)
     }
 
@@ -747,85 +624,17 @@ impl Database {
 
     /// Gets all messages for a session (for context display).
     pub fn get_session_messages(&self, session_id: &str) -> Result<Vec<SearchResult>> {
-        let mut stmt = self.conn.prepare(
-            r"
-            SELECT id, chunk_kind, content, project, session_id,
-                   role, tool_name, tool_id, tool_input, is_error, timestamp
-            FROM documents
-            WHERE session_id = ?1
-            ORDER BY timestamp ASC, rowid ASC
-            ",
-        )?;
+        let sql = format!(
+            "SELECT {DOC_COLUMNS}
+             FROM documents d
+             WHERE d.session_id = ?1
+             ORDER BY d.timestamp ASC, d.rowid ASC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
 
         let results = stmt
-            .query_map(params![session_id], |row| {
-                Ok(SearchResult {
-                    id: row.get(0)?,
-                    chunk_kind: row.get(1)?,
-                    content: row.get(2)?,
-                    project: row.get(3)?,
-                    session_id: row.get(4)?,
-                    role: row.get(5)?,
-                    tool_name: row.get(6)?,
-                    tool_id: row.get(7)?,
-                    tool_input: row.get(8)?,
-                    is_error: row.get(9)?,
-                    timestamp: row.get(10)?,
-                    score: 0.0,
-                })
-            })?
+            .query_map(params![session_id], |row| row_to_result_fts(row, false))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(results)
-    }
-
-    /// Regex search (full table scan).
-    pub fn search_regex(
-        &self,
-        pattern: &str,
-        limit: usize,
-        ignore_case: bool,
-    ) -> Result<Vec<SearchResult>> {
-        let regex = if ignore_case {
-            regex::Regex::new(&format!("(?i){pattern}"))?
-        } else {
-            regex::Regex::new(pattern)?
-        };
-
-        let mut stmt = self.conn.prepare(
-            r"
-            SELECT id, chunk_kind, content, project, session_id,
-                   role, tool_name, tool_id, tool_input, is_error, timestamp
-            FROM documents
-            ",
-        )?;
-
-        let mut results = Vec::new();
-        let mut rows = stmt.query([])?;
-
-        while let Some(row) = rows.next()? {
-            let content: String = row.get(2)?;
-            if regex.is_match(&content) {
-                results.push(SearchResult {
-                    id: row.get(0)?,
-                    chunk_kind: row.get(1)?,
-                    content,
-                    project: row.get(3)?,
-                    session_id: row.get(4)?,
-                    role: row.get(5)?,
-                    tool_name: row.get(6)?,
-                    tool_id: row.get(7)?,
-                    tool_input: row.get(8)?,
-                    is_error: row.get(9)?,
-                    timestamp: row.get(10)?,
-                    score: 1.0,
-                });
-
-                if results.len() >= limit {
-                    break;
-                }
-            }
-        }
 
         Ok(results)
     }
@@ -942,33 +751,8 @@ impl Database {
         })
     }
 
-    /// Lists all indexed projects with document counts and last activity.
-    pub fn list_projects(&self) -> Result<Vec<(String, i64, Option<String>)>> {
-        let mut stmt = self.conn.prepare(
-            r"
-            SELECT project, COUNT(*) as doc_count, MAX(timestamp) as last_activity
-            FROM documents
-            WHERE project IS NOT NULL
-            GROUP BY project
-            ORDER BY last_activity DESC
-            ",
-        )?;
-
-        let results = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(results)
-    }
-
     /// Gets recent sessions, optionally filtered by project.
-    #[allow(
-        clippy::cast_sign_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap
-    )]
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn get_recent_sessions(
         &self,
         limit: usize,
@@ -1023,115 +807,76 @@ impl Database {
         Ok(results)
     }
 
-    /// Gets document IDs for a session (for embedding lookup).
-    pub fn get_session_doc_ids(&self, session_id: &str) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            r"
-            SELECT id FROM documents
-            WHERE session_id = ?1
-            ",
+    #[cfg(any(test, fuzzing))]
+    pub fn clear(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "DELETE FROM documents_vec; DELETE FROM documents; DELETE FROM documents_fts;",
         )?;
-
-        let results = stmt
-            .query_map(params![session_id], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(results)
+        Ok(())
     }
 
-    /// Gets embeddings for a list of document IDs.
-    #[allow(clippy::cast_possible_wrap)]
-    pub fn get_embeddings_for_docs(&self, doc_ids: &[String]) -> Result<Vec<Vec<f32>>> {
-        if doc_ids.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let placeholders: Vec<_> = (1..=doc_ids.len()).map(|i| format!("?{i}")).collect();
-        let sql = format!(
-            "SELECT embedding FROM documents_vec WHERE id IN ({})",
-            placeholders.join(", ")
-        );
-
-        let mut stmt = self.conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> = doc_ids
-            .iter()
-            .map(|id| id as &dyn rusqlite::ToSql)
-            .collect();
-
-        let results = stmt
-            .query_map(params.as_slice(), |row| {
-                let blob: Vec<u8> = row.get(0)?;
-                Ok(bytes_to_embedding(&blob))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(results)
-    }
-
-    /// Searches for documents similar to an averaged embedding, excluding a session.
-    #[allow(clippy::cast_possible_wrap)]
-    pub fn search_vector_excluding_session(
-        &self,
-        query_embedding: &[f32],
-        exclude_session: &str,
-        limit: usize,
-    ) -> Result<Vec<SearchResult>> {
-        let embedding_bytes = embedding_to_bytes(query_embedding);
-
-        // We fetch more and filter, since we can't filter in the vec query.
-        // Cap at 4096 which is sqlite-vec's maximum k value.
-        let fetch_limit = (limit * 10).min(4096);
-
-        let mut stmt = self.conn.prepare(
-            r"
-            SELECT v.id, v.distance, d.chunk_kind, d.content, d.project, d.session_id,
-                   d.role, d.tool_name, d.tool_id, d.tool_input, d.is_error, d.timestamp
-            FROM documents_vec v
-            JOIN documents d ON d.id = v.id
-            WHERE embedding MATCH ?1 AND k = ?2
-            ORDER BY distance
-            ",
+    #[cfg(any(test, fuzzing))]
+    pub fn insert_document(&self, doc: &Document) -> Result<()> {
+        self.conn.execute(
+            r"INSERT OR REPLACE INTO documents
+            (id, chunk_kind, content, project, session_id, role, tool_name, tool_id, tool_input, is_error, timestamp, source_path)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                doc.id, doc.chunk_kind.as_str(), doc.content, doc.project, doc.session_id,
+                doc.role, doc.tool_name, doc.tool_id, doc.tool_input, doc.is_error,
+                doc.timestamp.map(|t| t.to_rfc3339()), doc.source_path.to_string_lossy(),
+            ],
         )?;
-
-        let mut results = Vec::new();
-        let rows = stmt.query_map(params![embedding_bytes, fetch_limit as i64], |row| {
-            Ok(SearchResult {
-                id: row.get(0)?,
-                score: 1.0 - row.get::<_, f64>(1)?,
-                chunk_kind: row.get(2)?,
-                content: row.get(3)?,
-                project: row.get(4)?,
-                session_id: row.get(5)?,
-                role: row.get(6)?,
-                tool_name: row.get(7)?,
-                tool_id: row.get(8)?,
-                tool_input: row.get(9)?,
-                is_error: row.get(10)?,
-                timestamp: row.get(11)?,
-            })
-        })?;
-
-        for row in rows {
-            let result = row?;
-            // Skip results from the excluded session
-            if result.session_id.as_deref() != Some(exclude_session) {
-                results.push(result);
-                if results.len() >= limit {
-                    break;
-                }
-            }
-        }
-
-        Ok(results)
+        Ok(())
     }
 }
 
-/// Converts bytes back to an f32 embedding vector.
-fn bytes_to_embedding(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect()
+/// Document columns selected in FTS and session queries.
+const DOC_COLUMNS: &str =
+    "d.id, d.chunk_kind, d.content, d.project, d.session_id, d.role, d.tool_name, d.tool_id, d.tool_input, d.is_error, d.timestamp";
+
+/// Document columns selected in vector queries (prefixed with id and distance from vec table).
+const VEC_DOC_COLUMNS: &str =
+    "v.id, v.distance, d.chunk_kind, d.content, d.project, d.session_id, d.role, d.tool_name, d.tool_id, d.tool_input, d.is_error, d.timestamp";
+
+/// Maps a row from a FTS/session query (doc columns at 0-10, optional score at 11).
+fn row_to_result_fts(row: &rusqlite::Row<'_>, has_score: bool) -> rusqlite::Result<SearchResult> {
+    Ok(SearchResult {
+        id: row.get(0)?,
+        chunk_kind: row.get(1)?,
+        content: row.get(2)?,
+        project: row.get(3)?,
+        session_id: row.get(4)?,
+        role: row.get(5)?,
+        tool_name: row.get(6)?,
+        tool_id: row.get(7)?,
+        tool_input: row.get(8)?,
+        is_error: row.get(9)?,
+        timestamp: row.get(10)?,
+        score: if has_score {
+            row.get::<_, f64>(11)?.abs()
+        } else {
+            0.0
+        },
+    })
+}
+
+/// Maps a row from a vector query (id at 0, distance at 1, doc columns at 2-11).
+fn row_to_result_vec(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchResult> {
+    Ok(SearchResult {
+        id: row.get(0)?,
+        score: 1.0 - row.get::<_, f64>(1)?,
+        chunk_kind: row.get(2)?,
+        content: row.get(3)?,
+        project: row.get(4)?,
+        session_id: row.get(5)?,
+        role: row.get(6)?,
+        tool_name: row.get(7)?,
+        tool_id: row.get(8)?,
+        tool_input: row.get(9)?,
+        is_error: row.get(10)?,
+        timestamp: row.get(11)?,
+    })
 }
 
 /// Converts an f32 slice to bytes for sqlite-vec.
@@ -1173,69 +918,66 @@ fn escape_fts_query_with_operator(query: &str, operator: &str) -> String {
         .join(operator)
 }
 
-/// Computes FTS weight for hybrid search based on query length.
-///
-/// Short queries benefit from text matching since semantic models
-/// need more context to produce meaningful embeddings. This function
-/// returns a weight multiplier for FTS scores in RRF fusion:
-///
-/// - Queries < 15 chars: FTS weight 2.5 (strongly favor exact matches)
-/// - Queries 15-30 chars: FTS weight 1.5 (slightly favor text)
-/// - Queries > 30 chars: FTS weight 1.0 (equal weighting)
-fn compute_fts_weight(query: &str) -> f64 {
-    let len = query.trim().len();
-    if len < 15 {
-        2.5
-    } else if len < 30 {
-        1.5
-    } else {
-        1.0
+/// Appends WHERE clauses and collects parameters for filtered search methods.
+fn append_filter_clauses(
+    sql: &mut String,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    start_idx: usize,
+    chunk_kind: Option<ChunkKind>,
+    tool_name: Option<&str>,
+    errors_only: bool,
+) {
+    let mut idx = start_idx;
+    if let Some(ck) = chunk_kind {
+        let _ = write!(sql, " AND d.chunk_kind = ?{idx}");
+        idx += 1;
+        params.push(Box::new(ck.as_str().to_string()));
+    }
+    if let Some(tn) = tool_name {
+        let _ = write!(sql, " AND LOWER(d.tool_name) = LOWER(?{idx})");
+        idx += 1;
+        params.push(Box::new(tn.to_string()));
+    }
+    if errors_only {
+        let _ = write!(sql, " AND d.is_error = ?{idx}");
+        params.push(Box::new(1_i32));
     }
 }
 
-/// Reciprocal Rank Fusion for combining search results.
-/// Weighted RRF fusion with configurable text weight.
+/// Convex combination fusion for hybrid search (Bruch et al., TOIS 2023).
 ///
-/// The `fts_weight` parameter controls how much to favor text matches:
-/// - 1.0 = equal weight to FTS and vector (default)
-/// - 2.0 = FTS results count double
-/// - 0.5 = vector results dominate
-fn rrf_fusion_weighted(
+/// Combines FTS and vector scores using min-max normalization and a fixed
+/// alpha=0.75 (75% FTS, 25% vector).
+fn cc_fusion(
     fts_results: &[SearchResult],
     vec_results: &[SearchResult],
     limit: usize,
-    fts_weight: f64,
 ) -> Vec<SearchResult> {
-    use std::collections::HashMap;
+    const ALPHA: f64 = 0.75;
 
-    const K: f64 = 60.0;
+    let fts_norm = normalize_scores_min_max(fts_results);
+    let vec_norm = normalize_scores_min_max(vec_results);
 
     let mut scores: HashMap<String, f64> = HashMap::new();
     let mut results_map: HashMap<String, SearchResult> = HashMap::new();
 
-    // Score FTS results (with weight)
-    for (rank, result) in fts_results.iter().enumerate() {
-        let rrf_score = fts_weight / (K + rank as f64 + 1.0);
-        *scores.entry(result.id.clone()).or_insert(0.0) += rrf_score;
+    for (result, norm_score) in fts_results.iter().zip(fts_norm.iter()) {
+        *scores.entry(result.id.clone()).or_insert(0.0) += ALPHA * norm_score;
         results_map
             .entry(result.id.clone())
             .or_insert_with(|| result.clone());
     }
 
-    // Score vector results (weight 1.0)
-    for (rank, result) in vec_results.iter().enumerate() {
-        let rrf_score = 1.0 / (K + rank as f64 + 1.0);
-        *scores.entry(result.id.clone()).or_insert(0.0) += rrf_score;
+    for (result, norm_score) in vec_results.iter().zip(vec_norm.iter()) {
+        *scores.entry(result.id.clone()).or_insert(0.0) += (1.0 - ALPHA) * norm_score;
         results_map
             .entry(result.id.clone())
             .or_insert_with(|| result.clone());
     }
 
-    // Sort by combined score
     let mut scored_ids: Vec<_> = scores.into_iter().collect();
     scored_ids.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Take top results and update scores
     scored_ids
         .into_iter()
         .take(limit)
@@ -1244,6 +986,33 @@ fn rrf_fusion_weighted(
                 r.score = score;
                 r
             })
+        })
+        .collect()
+}
+
+/// Min-max normalizes scores to [0, 1].
+fn normalize_scores_min_max(results: &[SearchResult]) -> Vec<f64> {
+    if results.is_empty() {
+        return vec![];
+    }
+    let min = results
+        .iter()
+        .map(|r| r.score)
+        .fold(f64::INFINITY, f64::min);
+    let max = results
+        .iter()
+        .map(|r| r.score)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let range = max - min;
+
+    results
+        .iter()
+        .map(|r| {
+            if range.abs() < f64::EPSILON {
+                1.0
+            } else {
+                (r.score - min) / range
+            }
         })
         .collect()
 }
@@ -1291,7 +1060,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rrf_fusion() {
+    fn test_cc_fusion() {
         let fts = vec![
             SearchResult {
                 id: "a".to_string(),
@@ -1354,10 +1123,11 @@ mod tests {
             },
         ];
 
-        let fused = rrf_fusion_weighted(&fts, &vec, 10, 1.0);
+        let fused = cc_fusion(&fts, &vec, 10);
 
-        // "b" appears in both, should have highest score
-        assert_eq!(fused[0].id, "b");
+        // "a" has the strongest FTS score, so with alpha=0.75 it dominates
+        assert_eq!(fused[0].id, "a");
+        assert_eq!(fused.len(), 3);
         assert!(fused[0].score > fused[1].score);
     }
 
@@ -1474,45 +1244,7 @@ mod tests {
         }
 
         #[test]
-        fn proptest_compute_fts_weight_valid_values(query in ".*") {
-            let weight = compute_fts_weight(&query);
-            prop_assert!(
-                (weight - 1.0).abs() < f64::EPSILON
-                    || (weight - 1.5).abs() < f64::EPSILON
-                    || (weight - 2.5).abs() < f64::EPSILON,
-                "Unexpected weight: {weight}"
-            );
-        }
-
-        #[test]
-        fn proptest_compute_fts_weight_monotonic(short in ".{0,14}", long in ".{31,60}") {
-            let w_short = compute_fts_weight(&short);
-            let w_long = compute_fts_weight(&long);
-            prop_assert!(w_short >= w_long, "Short query weight {w_short} < long query weight {w_long}");
-        }
-
-        #[test]
-        fn proptest_embedding_roundtrip(values in prop::collection::vec(-1.0f32..1.0f32, 0..100)) {
-            let bytes = embedding_to_bytes(&values);
-            let recovered = bytes_to_embedding(&bytes);
-            prop_assert_eq!(values.len(), recovered.len());
-            for (orig, rec) in values.iter().zip(recovered.iter()) {
-                prop_assert_eq!(orig.to_bits(), rec.to_bits());
-            }
-        }
-
-        #[test]
-        fn proptest_bytes_roundtrip(bytes in prop::collection::vec(0u8..=255u8, 0..400usize).prop_filter(
-            "length must be multiple of 4",
-            |v| v.len() % 4 == 0
-        )) {
-            let embedding = bytes_to_embedding(&bytes);
-            let recovered_bytes = embedding_to_bytes(&embedding);
-            prop_assert_eq!(bytes, recovered_bytes);
-        }
-
-        #[test]
-        fn proptest_rrf_fusion_no_duplicates(
+        fn proptest_cc_fusion_no_duplicates(
             n_fts in 0..20usize,
             n_vec in 0..20usize,
             limit in 1..30usize,
@@ -1524,7 +1256,7 @@ mod tests {
                 .map(|i| arb_search_result(&format!("vec-{i}"), 0.9 - i as f64 * 0.01))
                 .collect();
 
-            let fused = rrf_fusion_weighted(&fts_results, &vec_results, limit, 1.0);
+            let fused = cc_fusion(&fts_results, &vec_results, limit);
 
             // No duplicate IDs
             let mut seen = std::collections::HashSet::new();
@@ -1534,7 +1266,7 @@ mod tests {
         }
 
         #[test]
-        fn proptest_rrf_fusion_length_bounded(
+        fn proptest_cc_fusion_length_bounded(
             n_fts in 0..20usize,
             n_vec in 0..20usize,
             limit in 1..30usize,
@@ -1546,7 +1278,7 @@ mod tests {
                 .map(|i| arb_search_result(&format!("vec-{i}"), 0.9 - i as f64 * 0.01))
                 .collect();
 
-            let fused = rrf_fusion_weighted(&fts_results, &vec_results, limit, 1.0);
+            let fused = cc_fusion(&fts_results, &vec_results, limit);
 
             // Count unique IDs across both input lists
             let mut all_ids = std::collections::HashSet::new();
@@ -1558,11 +1290,10 @@ mod tests {
         }
 
         #[test]
-        fn proptest_rrf_fusion_scores_non_increasing(
+        fn proptest_cc_fusion_scores_non_increasing(
             n_fts in 1..15usize,
             n_vec in 1..15usize,
             limit in 1..30usize,
-            fts_weight in 0.5..3.0f64,
         ) {
             let fts_results: Vec<SearchResult> = (0..n_fts)
                 .map(|i| arb_search_result(&format!("fts-{i}"), 10.0 - i as f64))
@@ -1571,7 +1302,7 @@ mod tests {
                 .map(|i| arb_search_result(&format!("vec-{i}"), 0.9 - i as f64 * 0.01))
                 .collect();
 
-            let fused = rrf_fusion_weighted(&fts_results, &vec_results, limit, fts_weight);
+            let fused = cc_fusion(&fts_results, &vec_results, limit);
 
             for window in fused.windows(2) {
                 prop_assert!(

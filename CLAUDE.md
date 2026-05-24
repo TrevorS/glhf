@@ -19,9 +19,9 @@ cargo bench         # Run benchmarks
 
 ## Using glhf (for Claude)
 
-glhf searches your Claude Code conversation history. Use it to find past solutions, recall commands, and discover related work.
+glhf searches your Claude Code conversation history. Use it to find past solutions and recall commands.
 
-**Index management:** Search prints a staleness note (e.g., "Index is 5 files behind") when files have changed since the last index. Run `glhf index` for a fast incremental update (only changed files) or `glhf index --full` to rebuild from scratch.
+**Index management:** Search prints a staleness note when files have changed since the last index. Run `glhf index` for a fast incremental update or `glhf index --full` to rebuild.
 
 ### Quick Reference
 
@@ -29,11 +29,14 @@ glhf searches your Claude Code conversation history. Use it to find past solutio
 # Search with compact output (fewer tokens)
 glhf search "error handling" --compact -l 10
 
-# Find past solutions semantically
-glhf search "authentication" --mode semantic --compact
+# Filter by tool type
+glhf search "deploy" -t Bash --compact
 
-# Get session ID to explore further
-glhf search "bug fix" --show-session-id --compact
+# Filter by current project
+glhf search "test" -p . --compact
+
+# Filter by time
+glhf search "error" --errors --since 1d --compact
 
 # Quick session overview
 glhf session abc123 --summary
@@ -41,25 +44,15 @@ glhf session abc123 --summary
 # Get limited context from a session
 glhf session abc123 --limit 30
 
-# Find related past sessions
-glhf related abc123 --limit 5
-
-# See all projects
-glhf projects
-
-# Filter by current project
-glhf search "test" -p . --compact
-
-# Filter by tool type
-glhf search "deploy" -t Bash --compact
+# Recent sessions
+glhf recent -p myproject
 ```
 
 ### Recommended Patterns
 
 **Finding past solutions:**
 ```bash
-glhf search "problem description" --mode semantic --compact
-glhf search "specific keyword" --show-session-id
+glhf search "problem description" --compact
 glhf session <id> --summary
 ```
 
@@ -74,21 +67,6 @@ glhf search "git" -t Bash --since 1w --compact
 glhf search "error" --errors --since 1d --compact
 ```
 
-**Exploring related work:**
-```bash
-glhf related <session-id> --limit 5
-```
-
-### Output Modes
-
-| Flag | Use Case |
-|------|----------|
-| `--compact` | Quick scanning, fewer tokens |
-| `--json` | Machine-readable, structured data |
-| `--show-session-id` | Get IDs to explore sessions |
-| `--summary` | Session overview without full content |
-| `--limit N` | Control output size |
-
 ### All Search Flags
 
 These are the ONLY valid flags for `glhf search`. Do not invent others.
@@ -96,37 +74,19 @@ These are the ONLY valid flags for `glhf search`. Do not invent others.
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--limit N` | `-l N` | Max results (default: 10) |
-| `--mode MODE` | `-m MODE` | hybrid (default), text, or semantic |
-| `--regex` | `-e` | Interpret query as regex |
-| `--ignore-case` | `-i` | Case-insensitive (regex mode) |
-| `--after-context N` | `-A N` | Show N messages after each match |
-| `--before-context N` | `-B N` | Show N messages before each match |
-| `--context N` | `-C N` | Show N messages before and after |
 | `--tool NAME` | `-t NAME` | Filter by tool (Bash, Read, Edit, etc.) |
 | `--project NAME` | `-p NAME` | Filter by project (use `.` for current) |
+| `--since DURATION` | | Time filter (1h, 2d, 1w, or 2024-12-01) |
 | `--errors` | | Only show error results |
-| `--messages-only` | | Only human/AI messages (no tool calls) |
-| `--tools-only` | | Only tool calls (no messages) |
 | `--json` | | Machine-readable JSON output |
 | `--compact` | | One line per result |
-| `--show-session-id` | | Include session IDs |
-| `--scores` | | Show relevance scores |
-| `--since DURATION` | | Time filter (1h, 2d, 1w, or 2024-12-01) |
-| `--exclude-project NAME` | `-X NAME` | Exclude project (repeatable) |
-| `--exclude-this-project` | | Exclude current project |
-| `--include-this-project` | | Override default current-project exclusion |
-| `--include-this-session` | | Override default current-session exclusion |
-| `--this-session` | | Only show results from current session |
-| `--oldest` | | Show oldest results first |
 
 ### Tips
 
 1. **Use `--compact` by default** - reduces output tokens significantly
-2. **Use `--mode semantic`** for conceptual searches ("how to handle X")
-3. **Use `--mode text`** for exact keyword matching
-4. **Chain commands**: search → get session ID → view summary → get context
-5. **Use `-p .`** to filter to current project
-6. **Use `--since`** to focus on recent history (1h, 1d, 1w)
+2. **Chain commands**: search → view session summary → get context
+3. **Use `-p .`** to filter to current project
+4. **Use `--since`** to focus on recent history (1h, 1d, 1w)
 
 ## Architecture
 
@@ -136,61 +96,43 @@ glhf is a CLI tool for searching Claude Code conversation history using hybrid s
 
 1. **Ingest** (`ingest/`) - Walks `~/.claude/projects/` and parses JSONL conversation files
 2. **Document** (`document.rs`) - Extracts chunks: messages, tool_use, tool_result
-3. **Embed** (`embed.rs`) - Generates 512-dim embeddings via model2vec-rs (Potion-retrieval-32M)
+3. **Embed** (`embed.rs`) - Generates 512-dim embeddings via model2vec-rs (Potion-base-32M)
 4. **Database** (`db/mod.rs`) - Stores in SQLite with FTS5 + sqlite-vec for hybrid search
-5. **Commands** (`commands.rs`) - CLI handlers for index, search, status, projects, session, related
+5. **Format** (`format.rs`) - Display formatting, time/size helpers, project name extraction
+6. **Commands** (`commands.rs`) - CLI handlers for index, search, status, session, recent
 
 ### Key Design Decisions
 
 - **sqlite-vec FFI**: Uses `sqlite3_auto_extension` with a `Once` guard to register the extension before any connection opens. The unsafe transmute is required due to FFI signature differences.
 
-- **Hybrid Search**: Combines FTS5 BM25 scores with vector cosine distance using Reciprocal Rank Fusion (RRF). Short queries (< 15 chars) weight text matches more heavily since semantic models need more context. Each search mode fetches 3x the limit for better fusion.
+- **Hybrid Search**: Combines FTS5 BM25 scores with vector cosine similarity using convex combination (CC) with alpha=0.75 (75% FTS, 25% vector). Min-max normalization maps both score types to [0,1] before combining. Evaluated on 1K queries across StackOverflow-QA and CodeFeedback-MT — outperforms RRF by +8.9% MRR and FTS-only by +1.2% MRR.
 
-- **Path Encoding**: Claude Code encodes project paths in directory names: `/` becomes `-`, `/.` becomes `--`. However, the encoding is lossy (hyphens in original names become indistinguishable from separators), so we store raw encoded paths and extract display names via pattern matching (e.g., `-Projects-` marker).
+- **Embedding Model**: potion-base-32M (512 dimensions) via model2vec-rs. Static embeddings (token lookup + mean pooling) — no transformer inference, ~4600 docs/sec on CPU. Evaluated against potion-retrieval-32M, potion-code-16M, static-retrieval-mrl-en-v1, and ONNX models (arctic-embed-xs, MiniLM, bge-small). base-32M wins on our eval (27/27 hybrid hit@5).
 
-- **Chunk Types**: Three indexed types with shared `DisplayLabel` trait for consistent formatting across `Document` and `SearchResult`.
+- **Path Encoding**: Claude Code encodes project paths in directory names: `/` becomes `-`, `/.` becomes `--`. The encoding is lossy, so we store raw encoded paths and extract display names via pattern matching.
 
-- **Session Similarity**: The `related` command averages embeddings from a session to create a "session vector", then searches for similar documents from other sessions.
+- **Incremental Indexing**: The `index_meta` table tracks `(source_path, mtime_secs, doc_count)` per file. Only files with changed mtimes are re-parsed. `--full` deletes the DB and rebuilds.
 
-- **Incremental Indexing**: The `index_meta` table tracks `(source_path, mtime_secs, doc_count)` per file. On `glhf index`, only files with changed mtimes are re-parsed. `--full` deletes the DB and rebuilds from scratch.
-
-- **SQLite Performance**: Connection opens with WAL mode, `synchronous=NORMAL`, and 64MB cache. The indexing loop wraps all file operations in a single transaction to avoid per-file fsyncs. `insert_documents` uses savepoints (nestable within the outer transaction).
-
-- **sqlite-vec k limit**: sqlite-vec caps the knn `k` parameter at 4096. Filtered vector searches multiply the limit to over-fetch (since post-filtering reduces results), but must cap at 4096.
+- **SQLite Performance**: WAL mode, `synchronous=NORMAL`, 64MB cache. Bulk indexing drops FTS triggers and rebuilds the FTS index in one pass (5x faster than per-row triggers). Freshness check uses file-count comparison instead of per-file mtime scanning.
 
 ### Module Responsibilities
 
 | Module | Purpose |
 |--------|---------|
 | `main` | CLI argument parsing with clap |
-| `commands` | CLI command handlers (index, search, status, projects, session, related, recent) |
+| `commands` | CLI command handlers (index, search, status, session, recent) |
 | `config` | Database paths, Claude directory discovery |
-| `db` | SQLite with FTS5 + sqlite-vec, search methods |
+| `db` | SQLite with FTS5 + sqlite-vec, hybrid search with CC fusion |
 | `document` | Document struct, ChunkKind enum, DisplayLabel trait |
 | `embed` | Embedder wrapper around model2vec-rs |
 | `error` | Custom error types with thiserror |
+| `format` | Display formatting, time/size/number helpers, result printing |
 | `ingest` | JSONL parsing, project directory walking |
 | `utils` | Shared utilities (truncate_text) |
 
-### Adding New Commands
-
-1. Add variant to `Commands` enum in `main.rs`
-2. Add argument parsing with clap derive macros
-3. Add match arm in `main()` to call command handler
-4. Implement handler in `commands.rs`
-5. Add any needed database methods in `db/mod.rs`
-
-### Adding New Search Filters
-
-1. Add field to `SearchOptions` struct in `commands.rs`
-2. Add clap argument in `main.rs` Search variant
-3. Wire up in `main()` match arm
-4. Update `filter_result()` function in `commands.rs`
-5. Optionally add SQL filter in `search_fts_filtered()` for efficiency
-
 ## Testing
 
-Unit tests are co-located with modules. Integration tests cover the full ingest/search pipeline. Search quality eval tests (`tests/search_quality.rs`) validate retrieval relevance against a 500-doc synthetic corpus.
+Unit tests are co-located with modules. Integration tests cover the full ingest/search pipeline. Search quality eval tests validate retrieval relevance.
 
 ```bash
 cargo test                                       # Unit + integration + FTS quality tests
@@ -200,34 +142,21 @@ cargo test --test search_quality -- --ignored    # Full eval: semantic + hybrid 
 cargo test -- --ignored                          # All ignored tests (requires model)
 ```
 
-The search quality suite has 4 tiers:
-- **Tier 1 (FTS)**: 10 tests, no model needed, runs in CI
-- **Tier 2 (Semantic)**: 21 tests, requires model download, `#[ignore]` tagged
-- **Tier 3 (Hybrid/RRF)**: 3 tests, requires model download, `#[ignore]` tagged
-- **Tier 4 (Edge cases)**: 2 tests, no model needed
+### Search Quality Tests
 
-The synthetic corpus in `tests/common/corpus.rs` provides `SearchCorpus::standard()` with topic clusters, distractors, homonym pairs, and noise docs. Use `insert_into(&mut db)` for FTS-only tests and `insert_with_embeddings(&mut db)` for semantic/hybrid tests.
+`tests/search_quality.rs` has a 500-doc synthetic corpus with FTS, semantic, and hybrid tiers. Semantic/hybrid tests require model download and are `#[ignore]` tagged.
 
 ### Property Tests
 
-Property tests use `proptest` and are co-located with unit tests in each module. They verify invariants like "never panics on arbitrary input", roundtrip correctness, and mathematical properties (score normalization, RRF fusion ordering).
-
-```bash
-cargo test proptest                              # All property tests (~37 tests)
-cargo test --test property_tests                 # Integration-level property tests only
-```
-
-Property tests cover: FTS escape safety, embedding serialization roundtrips, RRF fusion invariants, score normalization, `parse_since` parsing, `truncate_text` bounds, `generate_id` determinism, `decode_project_path` safety, and JSONL parsing robustness.
+Property tests use `proptest` and verify invariants like "never panics on arbitrary input", score normalization bounds, and CC fusion ordering.
 
 ### Fuzz Testing
 
 Fuzz targets live in `fuzz/` (separate workspace, requires `cargo-fuzz` + nightly):
 
 ```bash
-cargo +nightly fuzz run fuzz_fts_escape -- -max_total_time=60   # FTS query fuzzing
-cargo +nightly fuzz run fuzz_parse_jsonl -- -max_total_time=60  # JSONL parser
-cargo +nightly fuzz run fuzz_truncate -- -max_total_time=60     # Text truncation
-cargo +nightly fuzz run fuzz_decode_path -- -max_total_time=60  # Path decoding
+cargo +nightly fuzz run fuzz_fts_escape -- -max_total_time=60
+cargo +nightly fuzz run fuzz_parse_jsonl -- -max_total_time=60
+cargo +nightly fuzz run fuzz_truncate -- -max_total_time=60
+cargo +nightly fuzz run fuzz_decode_path -- -max_total_time=60
 ```
-
-`Database::open_in_memory()` is gated on `#[cfg(any(test, fuzzing))]` so fuzz targets can use it.

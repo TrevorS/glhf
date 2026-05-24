@@ -45,13 +45,8 @@ pub trait DisplayLabel {
 
 /// The kind of chunk being indexed.
 ///
-/// This enum is marked `#[non_exhaustive]` to allow adding new chunk types
-/// in the future without breaking semver compatibility.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChunkKind {
-    /// A text message (user prompt or assistant response).
-    #[default]
     Message,
     /// A tool invocation by the assistant.
     ToolUse,
@@ -233,53 +228,6 @@ impl Document {
         self.is_error = is_error;
         self
     }
-
-    /// Returns true if this is a Message chunk.
-    #[must_use]
-    pub fn is_message(&self) -> bool {
-        self.chunk_kind == ChunkKind::Message
-    }
-
-    /// Returns true if this is a `ToolUse` chunk.
-    #[must_use]
-    pub fn is_tool_use(&self) -> bool {
-        self.chunk_kind == ChunkKind::ToolUse
-    }
-
-    /// Returns true if this is a `ToolResult` chunk.
-    #[must_use]
-    pub fn is_tool_result(&self) -> bool {
-        self.chunk_kind == ChunkKind::ToolResult
-    }
-
-    /// Returns a snippet of the content, truncated to approximately `max_chars` characters.
-    ///
-    /// The snippet will be truncated at a word boundary (space or newline) if possible.
-    /// This method is UTF-8 safe and will never split a multi-byte character.
-    #[must_use]
-    pub fn snippet(&self, max_chars: usize) -> &str {
-        // Count characters, not bytes
-        let char_count = self.content.chars().count();
-        if char_count <= max_chars {
-            return &self.content;
-        }
-
-        // Find the byte index corresponding to max_chars characters
-        let byte_index = self
-            .content
-            .char_indices()
-            .nth(max_chars)
-            .map_or(self.content.len(), |(i, _)| i);
-
-        let truncated = &self.content[..byte_index];
-
-        // Try to break at a word boundary
-        if let Some(last_space) = truncated.rfind([' ', '\n']) {
-            &self.content[..last_space]
-        } else {
-            truncated
-        }
-    }
 }
 
 impl DisplayLabel for Document {
@@ -348,57 +296,6 @@ mod tests {
     }
 
     #[test]
-    fn test_snippet_short() {
-        let doc = Document::new(
-            ChunkKind::Message,
-            "short".to_string(),
-            PathBuf::from("/test"),
-        );
-        assert_eq!(doc.snippet(100), "short");
-    }
-
-    #[test]
-    fn test_snippet_truncates() {
-        let doc = Document::new(
-            ChunkKind::Message,
-            "hello world this is a test".to_string(),
-            PathBuf::from("/test"),
-        );
-        // Truncates at word boundary before max_len
-        assert_eq!(doc.snippet(15), "hello world");
-    }
-
-    #[test]
-    fn test_snippet_utf8_safe() {
-        // Test with multi-byte UTF-8 characters
-        let doc = Document::new(
-            ChunkKind::Message,
-            "日本語テスト hello world".to_string(),
-            PathBuf::from("/test"),
-        );
-        // Should not panic and should truncate at character boundary
-        let snippet = doc.snippet(5);
-        assert_eq!(snippet, "日本語テス");
-    }
-
-    #[test]
-    fn test_snippet_emoji() {
-        let doc = Document::new(
-            ChunkKind::Message,
-            "Hello 🦀 world! This is a test.".to_string(),
-            PathBuf::from("/test"),
-        );
-        let snippet = doc.snippet(10);
-        // Should include the emoji and break at word boundary
-        assert_eq!(snippet, "Hello 🦀");
-    }
-
-    #[test]
-    fn test_chunk_kind_default() {
-        assert_eq!(ChunkKind::default(), ChunkKind::Message);
-    }
-
-    #[test]
     fn test_chunk_kind_display() {
         assert_eq!(ChunkKind::Message.to_string(), "message");
         assert_eq!(ChunkKind::ToolUse.to_string(), "tool_use");
@@ -447,19 +344,6 @@ mod tests {
         assert_eq!(doc.display_label(), "result:Bash (error)");
     }
 
-    #[test]
-    fn test_is_helpers() {
-        let msg = Document::new(ChunkKind::Message, String::new(), PathBuf::from("/test"));
-        assert!(msg.is_message());
-        assert!(!msg.is_tool_use());
-        assert!(!msg.is_tool_result());
-
-        let tool = Document::new(ChunkKind::ToolUse, String::new(), PathBuf::from("/test"));
-        assert!(!tool.is_message());
-        assert!(tool.is_tool_use());
-        assert!(!tool.is_tool_result());
-    }
-
     // --- Property tests ---
 
     use proptest::prelude::*;
@@ -494,42 +378,6 @@ mod tests {
             prop_assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
         }
 
-        #[test]
-        fn proptest_snippet_length_bounded(
-            content in ".{1,500}",
-            max_chars in 1..500usize
-        ) {
-            let doc = Document::new(
-                ChunkKind::Message,
-                content,
-                PathBuf::from("/test"),
-            );
-            let snippet = doc.snippet(max_chars);
-            prop_assert!(snippet.chars().count() <= max_chars);
-        }
-
-        #[test]
-        fn proptest_snippet_max_returns_full_content(content in ".{0,200}") {
-            let doc = Document::new(
-                ChunkKind::Message,
-                content.clone(),
-                PathBuf::from("/test"),
-            );
-            let snippet = doc.snippet(usize::MAX);
-            prop_assert_eq!(snippet, content.as_str());
-        }
-
-        #[test]
-        fn proptest_snippet_valid_utf8(content in "\\PC{0,200}", max_chars in 0..100usize) {
-            let doc = Document::new(
-                ChunkKind::Message,
-                content,
-                PathBuf::from("/test"),
-            );
-            let snippet = doc.snippet(max_chars);
-            // snippet is &str, so it's always valid UTF-8
-            prop_assert!(std::str::from_utf8(snippet.as_bytes()).is_ok());
-        }
     }
 
     #[test]

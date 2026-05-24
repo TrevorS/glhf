@@ -1,20 +1,16 @@
 # glhf
 
-A CLI tool for searching your Claude Code conversation history. Works for both humans and AI agents.
+A CLI tool for searching your Claude Code conversation history.
 
 ## Features
 
-- **Hybrid search** combining BM25 full-text + semantic search
+- **Hybrid search** combining BM25 full-text + semantic vector search
 - **Tool call indexing** - search Bash commands, file reads, edits, and more
-- **Regex search** with case-insensitive option
-- **Context display** - show messages before/after matches (like grep)
-- **Filtering** - by tool name, project, time range, errors only, messages only, or tools only
-- **Project listing** - see all indexed projects at a glance
+- **Filtering** - by tool name, project, time range, errors
 - **Session viewer** - view full conversations or quick summaries
-- **Related sessions** - find similar past work using embeddings
-- **JSON output** - machine-readable format for scripting and agents
-- **Incremental indexing** - only re-processes changed files, sub-second updates
-- Fast SQLite-based indexing with FTS5 and sqlite-vec
+- **JSON output** - machine-readable format for agents
+- **Incremental indexing** - only re-processes changed files
+- Fast SQLite-based storage with FTS5 and sqlite-vec
 
 ## Installation
 
@@ -25,20 +21,17 @@ cargo install --path .
 ## Quick Start
 
 ```bash
-# Build the search index (embeddings auto-download on first run)
+# Build the search index (model auto-downloads on first run)
 glhf index
 
 # Search your history
 glhf search "rust error handling"
 
-# See what projects you've worked on
-glhf projects
+# Compact output for scanning
+glhf search "cargo test" --compact
 
-# View a session summary
+# View a session
 glhf session abc123 --summary
-
-# Find related past work
-glhf related abc123
 ```
 
 ## Commands
@@ -46,379 +39,91 @@ glhf related abc123
 ### `glhf search` - Search conversations
 
 ```bash
-# Basic search (hybrid mode: text + semantic)
+# Basic search (hybrid: text + semantic)
 glhf search "rust error handling"
 
-# Compact output for quick scanning
+# Compact single-line output
 glhf search "cargo" --compact
-
-# Show session IDs to jump to full context
-glhf search "bug fix" --show-session-id
-
-# Text-only search (faster, keyword matching)
-glhf search "rust error" --mode text
-
-# Semantic search (meaning-based, finds related concepts)
-glhf search "how to handle failures" --mode semantic
-
-# Regex search
-glhf search -e "cargo (build|test)" -i
-
-# Show context around matches (like grep -C)
-glhf search "error" -C 2
 
 # Filter by tool type
 glhf search "git" -t Bash
 glhf search "main.rs" -t Read
-glhf search "function" -t Edit
 
 # Filter by project
 glhf search "bug" -p myapp
-glhf search "error" -p .    # current directory
+glhf search "error" -p .          # current directory
 
 # Filter by time
 glhf search "error" --since 1d
 glhf search "refactor" --since 1w
-glhf search "deploy" --since 2024-12-01
 
-# Filter by type
-glhf search "failed" --errors        # only errors
-glhf search "help me" --messages-only # only human/AI messages
-glhf search "main.rs" --tools-only    # only tool calls
-
-# JSON output (for scripting/agents)
-glhf search "error" --json
-```
-
-#### Search Options
-
-| Option | Description |
-|--------|-------------|
-| `-l, --limit <N>` | Maximum results (default: 10) |
-| `-m, --mode <MODE>` | hybrid, text, or semantic (default: hybrid) |
-| `-e, --regex` | Interpret query as regex |
-| `-i, --ignore-case` | Case-insensitive search |
-| `-A <N>` | Show N messages after each match |
-| `-B <N>` | Show N messages before each match |
-| `-C <N>` | Show N messages before and after |
-| `-t, --tool <NAME>` | Filter by tool (Bash, Read, Edit, Grep, etc.) |
-| `-p, --project <NAME>` | Filter by project (substring match, or `.` for cwd) |
-| `--since <DURATION>` | Filter by time (1h, 2d, 1w, or 2024-12-01) |
-| `--errors` | Only show error results |
-| `--messages-only` | Only show messages (exclude tool calls) |
-| `--tools-only` | Only show tool calls (exclude messages) |
-| `--compact` | Single-line output for quick scanning |
-| `--show-session-id` | Show session IDs for jumping to full context |
-| `--scores` | Show relevance scores (for debugging/tuning) |
-| `--oldest` | Show oldest results first (alias: `--reverse`) |
-| `--json` | Output results as JSON |
-
-#### Session & Project Filtering
-
-| Flag | Purpose |
-|------|---------|
-| `-X, --exclude-project` | Exclude specific project (repeatable) |
-| `--exclude-this-project` | Exclude current project from results |
-| `--include-this-project` | Override project auto-exclusion |
-| `--exclude-this-session` | Exclude current session from results |
-| `--include-this-session` | Override session auto-exclusion |
-| `--this-session` | Show only results from current session |
-
-**Auto-exclusion:** When running inside Claude Code (`CLAUDECODE=1`), the current project and session are auto-excluded to help find solutions from other contexts. Use `--include-*` flags to override.
-
-### `glhf projects` - List indexed projects
-
-```bash
-glhf projects
-```
-
-Output:
-```
-Projects (7 total)
-──────────────────────────────────────────────────
-.claude                 582 docs    last: 19m ago
-glhf                   4200 docs    last: 58m ago
-gym                   13664 docs    last: 4h ago
-myapp                  4220 docs    last: 1w ago
-```
-
-### `glhf session` - View conversation sessions
-
-```bash
-# View full session (partial ID matching supported)
-glhf session abc123
-
-# Quick summary without full content
-glhf session abc123 --summary
-
-# Show only first N messages
-glhf session abc123 --limit 20
+# Only errors
+glhf search "failed" --errors
 
 # JSON output
-glhf session abc123 --json
-```
-
-Summary output:
-```
-Session: ab808632-48b3-46ee-a2fb-74e5c7ee722a
-Project: glhf
-Duration: 13h 35m (started 14h ago)
-Messages: 3455 total
-  - assistant: 672
-  - user: 77
-  - tool calls: 1375
-  - tool results: 1331
-Tools used: Bash (441), Read (333), Edit (228), TodoWrite (82), WebSearch (59)
-```
-
-### `glhf related` - Find similar sessions
-
-Find past sessions that are semantically similar to a given session. Useful for "have I solved this before?" queries.
-
-```bash
-# Find sessions related to a specific session
-glhf related abc123
-
-# Limit number of results
-glhf related abc123 --limit 10
-```
-
-Output:
-```
-Finding sessions related to: ab808632-... (glhf)
-
-Related sessions:
-
-[1] 89a91234 | glhf | 5d ago | Score: 0.35
-    "Excellent! Now I have a complete picture of the glhf..."
-
-[2] e0bc965b | sandbox | 3w ago | Score: 0.34
-    "The file..."
-```
-
-### `glhf recent` - Show recent sessions
-
-Show the most recently modified sessions:
-
-```bash
-# Show 10 most recent sessions
-glhf recent
-
-# Show more sessions
-glhf recent -l 20
-
-# Filter by project
-glhf recent -p myproject
-```
-
-### `glhf status` - Check index status
-
-```bash
-glhf status
-```
-
-Output:
-```
-Database Status
-───────────────
-Location:    /Users/you/Library/Caches/glhf/glhf.db
-Size:        297.57 MB
-Documents:   79,309 (79,309 with embeddings)
-
-Sessions & Projects
-───────────────────
-Sessions:    474
-Projects:    40
-
-Most active projects:
-  myapp                10,637 docs     31 sessions
-  api-server           10,528 docs    103 sessions
-  dashboard             9,664 docs     34 sessions
-
-Content Breakdown
-─────────────────
-Messages:    20,771 (3,881 user / 16,890 assistant)
-Tool calls:  29,009
-Tool results: 29,529 (1,298 errors)
-
-Top tools:
-  Bash           10,283
-  Read            9,353
-  Grep            2,561
-  Edit            2,470
-  Glob            1,557
-
-Timeline
-────────
-First indexed: 2026-01-09 (7w ago)
-Last indexed:  2026-03-04 (5m ago)
-```
-
-### `glhf index` - Build/update search index
-
-```bash
-# Incremental update (only new/modified files, fast)
-glhf index
-
-# Full rebuild from scratch
-glhf index --full
-
-# Skip embeddings (text search only, faster)
-glhf index --skip-embeddings
-```
-
-Indexing is **incremental by default** — it tracks file modification times and only re-processes changed files. A typical incremental update takes under a second. Use `--full` to force a complete rebuild.
-
-Search automatically checks index freshness and prints a note if files have changed since the last index.
-
-## Common Workflows
-
-### "How did I solve this before?"
-
-```bash
-# Search for similar past work
-glhf search "authentication" --mode semantic
-
-# Find the session and get context
-glhf search "JWT token" --show-session-id
-glhf session abc123 --summary
-glhf session abc123 --limit 50
-```
-
-### "What commands did I run?"
-
-```bash
-# Find Bash commands
-glhf search "deploy" -t Bash --compact
-
-# Find recent errors
-glhf search "error" --errors --since 1d
-```
-
-### "What have I been working on?"
-
-```bash
-# See all projects
-glhf projects
-
-# Recent activity in current project
-glhf search "." -p . --since 1w --compact -l 20
-```
-
-### "Find related past sessions"
-
-```bash
-# Get session ID from search
-glhf search "database migration" --show-session-id
-
-# Find related sessions
-glhf related abc123
-```
-
-## Search Modes
-
-| Mode | Description | Best For |
-|------|-------------|----------|
-| `hybrid` | Combines FTS5 + vector search with RRF fusion (default) | General use |
-| `text` | BM25 full-text search only | Exact keyword matching, speed |
-| `semantic` | Vector similarity search | Finding conceptually related content |
-
-### Query Syntax (Text Mode)
-
-| Syntax | Example | Description |
-|--------|---------|-------------|
-| Single word | `error` | Match documents containing "error" |
-| Multiple words | `rust error` | Implicit AND - both words required |
-| OR | `rust OR python` | Match either word |
-| Phrase | `"git status"` | Exact phrase match |
-| Prefix | `err*` | Match words starting with "err" |
-| NOT | `rust NOT python` | Exclude documents with "python" |
-
-## For Claude Code / AI Agents
-
-glhf is designed to work well with AI agents. Key features:
-
-### JSON Output
-
-All commands support `--json` for machine-readable output:
-
-```bash
 glhf search "error" --json
-glhf session abc123 --json
 ```
 
-### Compact Output
+#### Search Flags
 
-Use `--compact` for dense, scannable results that use fewer tokens:
+| Flag | Description |
+|------|-------------|
+| `-l, --limit <N>` | Maximum results (default: 10) |
+| `-t, --tool <NAME>` | Filter by tool (Bash, Read, Edit, Grep) |
+| `-p, --project <NAME>` | Filter by project (substring match, `.` for cwd) |
+| `--since <DURATION>` | Time filter (1h, 2d, 1w, or 2024-12-01) |
+| `--errors` | Only show error results |
+| `--compact` | One line per result |
+| `--json` | JSON output |
+
+### `glhf session` - View a conversation
 
 ```bash
-glhf search "cargo" --compact -l 20
+glhf session abc123              # Full session
+glhf session abc123 --summary    # Quick overview
+glhf session abc123 --limit 30   # First 30 messages
+glhf session abc123 --json       # JSON output
 ```
 
-### Session Discovery
-
-Use `--show-session-id` to get session IDs, then explore with `glhf session`:
+### `glhf recent` - Recent sessions
 
 ```bash
-# Find relevant results with session IDs
-glhf search "bug fix" --show-session-id
-
-# Get summary of interesting session
-glhf session abc123 --summary
-
-# Get full context if needed
-glhf session abc123 --limit 50
+glhf recent                      # Last 10 sessions
+glhf recent -l 20                # More sessions
+glhf recent -p myproject         # Filter by project
 ```
 
-### Find Past Solutions
+### `glhf status` - Index stats
 
-Use `glhf related` to find sessions where you solved similar problems:
+Shows database size, document counts, top projects, content breakdown, and timeline.
+
+### `glhf index` - Build/update index
 
 ```bash
-glhf related <current-session-id> --limit 5
+glhf index                       # Incremental update (fast)
+glhf index --full                # Full rebuild
+glhf index --skip-embeddings     # Text search only
 ```
 
-## Data Format
+## How It Works
 
-glhf indexes conversation data from Claude Code stored in `~/.claude/projects/`.
+glhf combines FTS5 keyword search with static vector embeddings ([potion-base-32M](https://huggingface.co/minishlab/potion-base-32M)) using convex combination fusion (α=0.75). The two search systems find largely disjoint results — FTS catches exact keywords while vectors catch paraphrases — so combining them improves recall without hurting precision.
 
-### Directory Structure
+See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design decisions, model evaluation results, and what we tried and rejected.
 
-```
-~/.claude/
-├── projects/
-│   ├── -Users-you-Projects-myapp/     # Encoded project path
-│   │   ├── abc123.jsonl               # Conversation session
-│   │   └── def456.jsonl
-│   └── -Users-you--dotfiles/          # Double dash = hidden dir (.dotfiles)
-│       └── 789xyz.jsonl
-```
+### References
 
-Project directories are encoded versions of the original path:
-- Single dash `-` represents `/`
-- Double dash `--` represents `/.` (hidden directories)
-
-### Indexed Content
-
-| Chunk Type | Description | Example Content |
-|------------|-------------|-----------------|
-| `message` | User prompts and assistant responses | "How do I handle errors in Rust?" |
-| `tool_use` | Tool invocations by the assistant | Command: `git status` |
-| `tool_result` | Output from tool execution | "On branch main, nothing to commit" |
+- Bruch, Gai, Ingber. ["An Analysis of Fusion Functions for Hybrid Retrieval."](https://arxiv.org/abs/2210.11934) ACM TOIS 42(1), 2023.
+- Tulkens & van Dongen. [Model2Vec.](https://github.com/MinishLab/model2vec) 2024.
 
 ## Development
 
 ```bash
-make help     # Show available commands
 make check    # Format, lint, and test
-make bench    # Run benchmarks
+make build    # Build debug binary
+make release  # Build release binary
+make install  # Install to ~/.cargo/bin
 ```
-
-### Dependencies
-
-- **Embeddings**: model2vec-rs with Potion-retrieval-32M (512 dimensions, auto-downloads)
-- **Database**: SQLite with FTS5 + sqlite-vec
-- **No external setup required** - just `cargo build`
 
 ## License
 
