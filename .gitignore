@@ -26,3 +26,4 @@ fuzz/artifacts/
 **/proptest-regressions/
 *.proptest-regressions
 .fastembed_cache/
+.claude/worktrees/
